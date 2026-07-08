@@ -1,0 +1,217 @@
+{
+  "name": "Operator Health Check (Main)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "dd000004-0004-0004-0004-000000000001",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "oOyl0KwREkVOnNMo",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "dd000004-0004-0004-0004-000000000002",
+      "name": "Spark Health",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        80,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "e1OG7don4HJiR3rO",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "dd000004-0004-0004-0004-000000000003",
+      "name": "Kafka Health",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        80,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "JjfEa9AzXP7rc5te",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "dd000004-0004-0004-0004-000000000004",
+      "name": "CNPG Health",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        80,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "dd000004-0004-0004-0004-000000000005",
+      "name": "Merge Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 각 서비스 결과를 순서대로 읽음\nconst items = $input.all();\n\nconst results = items.map(item => item.json);\n\nconst now = new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' });\n\n// 상태 이모지 매핑\nconst statusEmoji = { ok: '✅', warning: '⚠️', error: '🔴' };\nconst statusLabel = { ok: '정상', warning: '경고', error: '오류' };\n\n// 전체 상태 결정 (가장 나쁜 상태)\nconst overallStatus = results.some(r => r.status === 'error')   ? 'error'\n                    : results.some(r => r.status === 'warning') ? 'warning'\n                    : 'ok';\n\n// 서비스별 섹션 빌드\nconst sections = results.map(r => {\n  const emoji = statusEmoji[r.status];\n  const label = statusLabel[r.status];\n  const m = r.metrics;\n\n  let detail = '';\n  if (r.service === 'Spark Operator') {\n    detail = [\n      `  • 오퍼레이터: ${m.operatorUp}/${m.operatorTotal} 가동`,\n      `  • 전체 잡: ${m.totalApps}개 (실행중 ${m.runningApps} / 성공 ${m.successApps} / 실패 ${m.failedApps})`,\n      `  • 최근 1h 신규 실패: ${m.newFailures}건`,\n      `  • 실행중 Executor: ${m.executorRun}개`,\n    ].join('\\n');\n  } else if (r.service === 'Strimzi Kafka Operator') {\n    detail = [\n      `  • 오퍼레이터: ${m.operatorUp}/${m.operatorTotal} 가동`,\n      `  • Kafka 클러스터: ${m.healthyClusters}/${m.totalClusters} 정상`,\n      `  • 재조정 (성공/실패): ${m.reconSuccess}/${m.reconFailed}`,\n      `  • 최근 1h 재조정 실패: ${m.newReconFail}건`,\n      `  • 인증서 만료: ${m.certMinDays}일 남음`,\n    ].join('\\n');\n  } else if (r.service === 'CloudNativePG Operator') {\n    detail = [\n      `  • 오퍼레이터: ${m.operatorUp}/${m.operatorTotal} 가동`,\n      `  • Reconcile (성공/오류): ${m.reconSuccessTotal}/${m.reconErrorTotal}`,\n      `  • 최근 1h 신규 오류: ${m.newReconErrors}건`,\n      `  • Cluster 컨트롤러 오류: ${m.clusterReconError}건`,\n      `  • 최근 1h 타임아웃: ${m.reconTimeouts}건`,\n    ].join('\\n');\n  }\n\n  const alertLines = r.alerts.length > 0\n    ? '\\n  🔔 알림:\\n' + r.alerts.map(a => `    - ${a}`).join('\\n')\n    : '';\n\n  return `${emoji} *${r.service}* — ${label}\\n${detail}${alertLines}`;\n});\n\nconst headerEmoji = statusEmoji[overallStatus];\nconst headerLabel = statusLabel[overallStatus];\n\nconst message = [\n  `${headerEmoji} *[Operator Health Check]* 전체 상태: *${headerLabel}*`,\n  `🕐 점검 시각: ${now}`,\n  '─'.repeat(40),\n  sections.join('\\n\\n'),\n  '─'.repeat(40),\n  '_이 메시지는 n8n이 매 시간 Prometheus 메트릭을 수집하여 자동 발송합니다._'\n].join('\\n');\n\nreturn [{ json: { message, overallStatus } }];"
+      },
+      "id": "dd000004-0004-0004-0004-000000000006",
+      "name": "Format Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        580,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "REPLACE_WITH_SLACK_WEBHOOK_URL",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ $json.message }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "dd000004-0004-0004-0004-000000000007",
+      "name": "Send to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        820,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [
+        [
+          {
+            "node": "Spark Health",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Kafka Health",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "CNPG Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spark Health": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Kafka Health": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "CNPG Health": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge Results": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Send to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "L9TuEn1uiWCvNdTD"
+}

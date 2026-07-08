@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trino-redis-tables
+  namespace: trino
+data:
+  # Redis 키 형식 규칙 (redis.default-schema=default 일 때):
+  #   - default 스키마 테이블 → 스키마 프리픽스 생략: <table>:<id>
+  #   - 다른 스키마 테이블    → <schema>:<table>:<id>
+  #
+  # users 테이블 삽입 예시 (redis.key-prefix-schema-table=true 기준):
+  #   redis-cli -a edsuser123 HSET "users:1" id 1 name "Alice" email "alice@example.com"
+  #   redis-cli -a edsuser123 HSET "users:2" id 2 name "Bob"   email "bob@example.com"
+  #
+  # Trino 조회:
+  #   SELECT * FROM redis.default.users;
+  users.json: |
+    {
+      "tableName": "users",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "id",
+            "type": "bigint",
+            "mapping": "id"
+          },
+          {
+            "name": "name",
+            "type": "varchar",
+            "mapping": "name"
+          },
+          {
+            "name": "email",
+            "type": "varchar",
+            "mapping": "email"
+          }
+        ]
+      }
+    }

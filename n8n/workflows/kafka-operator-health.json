@@ -1,0 +1,47 @@
+{
+  "name": "Kafka Operator Health",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "bb000002-0002-0002-0002-000000000001",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const PROM = 'http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/query';\n\nconst q = async (query) => {\n  const r = await $http.get({ url: PROM, qs: { query } });\n  const res = r.data.data.result;\n  return res.length > 0 ? parseFloat(res[0].value[1]) : 0;\n};\n\nconst qAll = async (query) => {\n  const r = await $http.get({ url: PROM, qs: { query } });\n  return r.data.data.result;\n};\n\n// 오퍼레이터 업 상태\nconst upResult    = await qAll('up{job=~\"operator-kafka.*\"}');\nconst operatorUp  = upResult.filter(r => r.value[1] === '1').length;\nconst operatorTotal = upResult.length;\n\n// Kafka 클러스터 상태 (1 = Ready, 0 = NotReady)\nconst clusterStateResult = await qAll('strimzi_resource_state{kind=\"Kafka\"}');\nconst totalClusters   = clusterStateResult.length;\nconst healthyClusters = clusterStateResult.filter(r => r.value[1] === '1').length;\nconst unhealthyClusters = totalClusters - healthyClusters;\n\n// 재조정 지표\nconst reconSuccess = await q('sum(strimzi_reconciliations_successful_total) or vector(0)');\nconst reconFailed  = await q('sum(strimzi_reconciliations_failed_total) or vector(0)');\nconst reconTotal   = await q('sum(strimzi_reconciliations_total) or vector(0)');\n\n// 1시간 신규 재조정 실패\nconst newReconFail = await q('sum(increase(strimzi_reconciliations_failed_total[1h])) or vector(0)');\n\n// 관리 중인 리소스 수 (kind=Kafka만)\nconst kafkaResources = await q('sum(strimzi_resources{kind=\"Kafka\"}) or vector(0)');\n\n// 인증서 만료 최솟값 (ms → days)\nconst certResult  = await qAll('strimzi_certificate_expiration_timestamp_ms');\nconst now         = Date.now();\nconst certMinDays = certResult.length > 0\n  ? Math.min(...certResult.map(r => (parseFloat(r.value[1]) - now) / 86400000))\n  : null;\n\nconst alerts = [];\nif (operatorUp < operatorTotal)  alerts.push(`🔴 오퍼레이터 Pod ${operatorTotal - operatorUp}개 다운`);\nif (unhealthyClusters > 0)       alerts.push(`🔴 Kafka 클러스터 ${unhealthyClusters}개 비정상`);\nif (newReconFail > 0)            alerts.push(`⚠️ 최근 1h 재조정 실패: ${newReconFail}건`);\nif (certMinDays !== null && certMinDays < 30) alerts.push(`⚠️ 인증서 만료 임박: ${Math.floor(certMinDays)}일 남음`);\n\nconst status = (operatorUp < operatorTotal || unhealthyClusters > 0) ? 'error'\n             : newReconFail > 0 ? 'warning'\n             : 'ok';\n\nreturn [{ json: {\n  service: 'Strimzi Kafka Operator',\n  status,\n  metrics: { operatorUp, operatorTotal, totalClusters, healthyClusters, unhealthyClusters, reconSuccess, reconFailed, newReconFail, kafkaResources, certMinDays: certMinDays !== null ? Math.floor(certMinDays) : 'N/A' },\n  alerts\n}}];"
+      },
+      "id": "bb000002-0002-0002-0002-000000000002",
+      "name": "Collect Kafka Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Collect Kafka Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "e1OG7don4HJiR3rO"
+}

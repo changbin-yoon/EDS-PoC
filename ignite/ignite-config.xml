@@ -1,0 +1,414 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Apache Ignite 2.x — 32GB 노드 최적화 프로덕션 인메모리 버퍼 설정
+  대상 버전  : apacheignite/ignite:2.18.0+
+  노드 메모리 : 32GB (OS 3GB + JVM Heap 6GB + Off-Heap 23GB)
+  아키텍처   : Kafka ──[IgniteKafkaStreamer]──▶ Ignite(Hot Buffer)
+                                                    ◀── Spark (Bulk Scan → Iceberg/S3)
+                                                    ◀── Trino (Hot Query + Federation)
+-->
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="
+         http://www.springframework.org/schema/beans
+         http://www.springframework.org/schema/beans/spring-beans.xsd">
+
+  <bean class="org.apache.ignite.configuration.IgniteConfiguration">
+
+    <property name="igniteInstanceName" value="eds-ignite-cluster"/>
+
+    <!-- ======================================================================
+         [1] PME 방지 — Failure Detection & 네트워크 타임아웃
+
+         PME(Partition Map Exchange)는 Ignite가 "노드가 죽었다"고 오판할 때 발생한다.
+         PME 동안 클러스터 전체 Write가 일시 블락되므로 오탐을 최소화해야 한다.
+
+         오탐 주요 원인:
+           ▸ Spark Full Scan 중 발생하는 GC Stop-The-World Pause (수십 초)
+           ▸ Kafka 대량 Ingest로 CPU 포화 시 일시적 응답 지연
+           ▸ Kubernetes CNI(Container Network Interface) 플러그인 재시작
+
+         타임아웃 산정 기준:
+           ▸ failureDetectionTimeout       : JVM 최대 GC Pause + 네트워크 지연 × 2 이상
+           ▸ clientFailureDetectionTimeout : Kafka 배치 처리 최대 시간 + 여유 버퍼
+    ====================================================================== -->
+    <property name="failureDetectionTimeout"       value="30000"/>
+    <property name="clientFailureDetectionTimeout" value="30000"/>
+    <property name="systemWorkerBlockedTimeout"    value="30000"/>
+
+    <!--
+         복구 불가능한 Critical Failure(OOM, Deadlock 등) 발생 시
+         즉시 JVM HALT 대신 Graceful Stop을 먼저 시도.
+         Kubernetes Pod가 SIGTERM을 받아 정상 Terminating 상태로 전환되어야
+         StatefulSet Controller가 대체 Pod를 안전하게 재스케줄링할 수 있다.
+    -->
+    <property name="failureHandler">
+      <bean class="org.apache.ignite.failure.StopNodeOrHaltFailureHandler">
+        <property name="tryStop" value="true"/>
+      </bean>
+    </property>
+
+    <!-- ======================================================================
+         [2] Discovery SPI — TcpDiscoveryKubernetesIpFinder (K8s 자동 클러스터링)
+
+         기존 TcpDiscoveryVmIpFinder 방식의 한계:
+           ▸ Pod IP가 재기동 시마다 변경 → 정적 IP 목록 관리 불가
+           ▸ HPA(Auto Scaling) 적용 시 신규 Pod를 자동으로 탐지하지 못함
+
+         TcpDiscoveryKubernetesIpFinder 동작 방식:
+           1. Pod 기동 시 Kubernetes API Server에 인증 (Service Account 토큰 자동 사용)
+           2. GET /api/v1/namespaces/{namespace}/endpoints/{serviceName} 호출
+           3. 헤드리스 서비스("ignite-service")의 엔드포인트 IP 목록을 가져옴
+           4. 각 IP의 discovery 포트(47500)로 TCP 연결을 시도하여 클러스터 구성
+
+         사전 요구사항:
+           ▸ RBAC: ServiceAccount에 endpoints/pods 의 get,list,watch 권한 필요
+                   ignite/ignite.yaml 내 ServiceAccount, Role, RoleBinding 참조
+           ▸ 헤드리스 서비스 "ignite-service"가 ignite 네임스페이스에 존재해야 함
+
+         필요 Maven 의존성:
+           <dependency>
+             <groupId>org.apache.ignite</groupId>
+             <artifactId>ignite-kubernetes</artifactId>
+             <version>2.18.0</version>
+           </dependency>
+    ====================================================================== -->
+    <property name="discoverySpi">
+      <bean class="org.apache.ignite.spi.discovery.tcp.TcpDiscoverySpi">
+        <property name="localPort"      value="47500"/>
+        <property name="networkTimeout" value="30000"/>
+        <property name="socketTimeout"  value="10000"/>
+        <property name="ackTimeout"     value="10000"/>
+        <property name="maxAckTimeout"  value="60000"/>
+        <property name="reconnectCount" value="10"/>
+        <property name="joinTimeout"    value="60000"/>
+
+        <property name="ipFinder">
+          <bean class="org.apache.ignite.spi.discovery.tcp.ipfinder.kubernetes.TcpDiscoveryKubernetesIpFinder">
+            <!-- Ignite Pod가 배포된 Kubernetes 네임스페이스 -->
+            <property name="namespace"   value="ignite"/>
+            <!--
+                 Ignite Pod를 셀렉트하는 헤드리스 서비스 이름.
+                 이 서비스의 엔드포인트 목록에서 각 Pod IP를 가져온다.
+                 ignite/ignite.yaml의 Service(ignite-service, ClusterIP: None) 와 동일해야 함.
+            -->
+            <property name="serviceName" value="ignite-service"/>
+            <!--
+                 masterUrl: Kubernetes API Server 주소.
+                 기본값(비어있으면) Pod 내부의 환경변수(KUBERNETES_SERVICE_HOST 등)를 자동 사용.
+                 외부 클러스터에서 실행하는 경우에만 명시적으로 지정.
+                 <property name="masterUrl" value="https://kubernetes.default.svc"/>
+            -->
+          </bean>
+        </property>
+      </bean>
+    </property>
+
+    <!-- ======================================================================
+         [3] Communication SPI — 노드 간 데이터 전송 (Bulk Scan 최적화)
+
+         - socketWriteTimeout  : Spark Bulk Read처럼 대용량 데이터 전송 시
+                                 소켓 쓰기가 길어져도 타임아웃 되지 않도록 여유 설정.
+         - messageQueueLimit   : 노드 간 메시지 큐 최대 크기. Back-pressure 제어.
+                                 큐 포화 시 송신 스레드를 블락 → 메모리 폭발 방지.
+         - connectionsPerNode  : 노드 간 병렬 TCP 연결 수.
+                                 Trino(병렬 쿼리) + Spark(Bulk Scan)가 동시 접근 시
+                                 단일 연결 병목을 분산.
+    ====================================================================== -->
+    <property name="communicationSpi">
+      <bean class="org.apache.ignite.spi.communication.tcp.TcpCommunicationSpi">
+        <property name="localPort"          value="47100"/>
+        <property name="connectTimeout"     value="10000"/>
+        <property name="maxConnectTimeout"  value="30000"/>
+        <property name="reconnectCount"     value="10"/>
+        <property name="socketWriteTimeout" value="30000"/>
+        <property name="messageQueueLimit"  value="1024"/>
+        <property name="connectionsPerNode" value="4"/>
+      </bean>
+    </property>
+
+    <!-- ======================================================================
+         [4] Client Connector — Thin Client(KafkaStreamer) + JDBC(Trino) 공용 포트
+
+         - threadPoolSize             : Kafka IgniteKafkaStreamer의 다중 스레드 Put
+                                        요청을 병렬 처리. KafkaStreamer.setThreads() 값과 맞춤.
+         - maxOpenCursorsPerConnection: Trino가 페이지 단위 커서를 유지하는 수.
+                                        Federation 쿼리 시 커서 수 부족으로 오류 방지.
+         - thinClientEnabled          : KafkaStreamer (Thin Client 프로토콜) (필수)
+         - jdbcEnabled                : Trino Ignite Connector (JDBC 프로토콜) (필수)
+    ====================================================================== -->
+    <property name="clientConnectorConfiguration">
+      <bean class="org.apache.ignite.configuration.ClientConnectorConfiguration">
+        <property name="port"                        value="10800"/>
+        <property name="threadPoolSize"              value="8"/>
+        <property name="maxOpenCursorsPerConnection" value="512"/>
+        <property name="thinClientEnabled"           value="true"/>
+        <property name="jdbcEnabled"                 value="true"/>
+        <property name="odbcEnabled"                 value="false"/>
+      </bean>
+    </property>
+
+    <!-- ======================================================================
+         [5] DataStorage — 32GB 노드 최적화 Pure In-Memory 설정
+
+         ┌─ 메모리 레이아웃 (32GB 노드 기준) ──────────────────────────────────┐
+         │  OS 마진      :  3 GB  (커널, 네트워크 버퍼, 기타 시스템 예약)       │
+         │  JVM Heap     :  6 GB  (-Xms6g -Xmx6g, ignite.yaml JVM_OPTS 참조)  │
+         │  Off-Heap     : 23 GB  (Ignite 데이터 전용 직접 메모리)              │
+         │  ────────────────────────────────────────────────────────────────   │
+         │  합계         : 32 GB  ✓                                            │
+         └─────────────────────────────────────────────────────────────────────┘
+
+         ┌─ Native Persistence 비활성화 이유 ──────────────────────────────────┐
+         │  ▸ 데이터 원본: Kafka (실시간) + S3/Iceberg (영구)                 │
+         │  ▸ Ignite 역할: 순수 Hot 데이터 인메모리 버퍼                      │
+         │  ▸ 디스크 WAL 기록 / Checkpoint / fsync → 불필요한 I/O 병목        │
+         │  ▸ 노드 재기동 시 데이터 소실 → Kafka에서 재인입 (의도된 동작)     │
+         └─────────────────────────────────────────────────────────────────────┘
+
+         ┌─ Off-Heap 사용 이유 ─────────────────────────────────────────────────┐
+         │  ▸ JVM Heap에 데이터를 올리면 GC(특히 Full GC)의 대상이 됨          │
+         │  ▸ Spark Bulk Read 중 대용량 데이터 처리 → Full GC 수십 초 발생     │
+         │  ▸ GC Pause > failureDetectionTimeout → PME 트리거 → Write 중단     │
+         │  ▸ Off-Heap은 GC 대상 아님 → GC 무관하게 안정적 대용량 운용 가능   │
+         └─────────────────────────────────────────────────────────────────────┘
+    ====================================================================== -->
+    <property name="dataStorageConfiguration">
+      <bean class="org.apache.ignite.configuration.DataStorageConfiguration">
+
+        <!--
+             페이지 크기 8KB (기본값 4KB 대비 2배):
+               ▸ Spark Full Scan 시 한 번에 더 많은 데이터를 읽어 순차 처리 효율 향상
+               ▸ Trino가 대량 스캔 시 I/O 횟수 감소
+               ⚠️  캐시 생성 후 변경 불가 — 클러스터 최초 기동 전에 반드시 결정
+        -->
+        <property name="pageSize" value="8192"/>
+
+        <!--
+             WAL 완전 비활성화:
+               persistenceEnabled=false 시 자동 비활성화되지만
+               설정 의도를 명시적으로 문서화하기 위해 선언.
+        -->
+        <property name="walMode" value="NONE"/>
+
+        <property name="defaultDataRegionConfiguration">
+          <bean class="org.apache.ignite.configuration.DataRegionConfiguration">
+            <property name="name" value="default_region"/>
+
+            <!-- Native Persistence 완전 비활성화 (Pure In-Memory 모드) -->
+            <property name="persistenceEnabled" value="false"/>
+
+            <!-- ── Off-Heap 메모리 크기 (32GB 노드 최적화) ─────────────────
+                 initialSize: 4GB — 클러스터 기동 즉시 사전 확보.
+                              사전 확보로 첫 Kafka Ingest 시 메모리 할당 지연 없음.
+                 maxSize    : 23GB = 24,696,061,952 bytes
+                              23 × 1,073,741,824 = 24,696,061,952 ✓
+                              ⚠️ 다른 노드 스펙에서는 이 값을 반드시 재산정 필요.
+            ──────────────────────────────────────────────────────────────── -->
+            <property name="initialSize" value="#{4L  * 1024 * 1024 * 1024}"/> <!--  4 GB -->
+            <property name="maxSize"     value="24696061952"/>                  <!-- 23 GB (정확한 byte 값) -->
+
+            <!-- ── Page Eviction — OOM 방지 핵심 설정 ───────────────────────
+
+                 [RANDOM_2_LRU 선택 이유]
+                 ┌─────────────────┬────────────────────────────────────────┐
+                 │ DISABLED        │ Eviction 없음. 메모리 포화 시 예외 발생│
+                 │ RANDOM_LRU      │ 1개 페이지 무작위 샘플 → Hot 데이터    │
+                 │                 │ 실수 방출 위험 높음                     │
+                 │ RANDOM_2_LRU ✓ │ 2개 페이지 샘플 → 덜 사용된 것 방출.   │
+                 │                 │ 최근 1회라도 접근된 Hot 페이지 보호.    │
+                 │                 │ Kafka Write(신규) + Trino Read(핫)      │
+                 │                 │ 혼재 환경에서 Cache Hit율 최적          │
+                 └─────────────────┴────────────────────────────────────────┘
+
+                 [evictionThreshold = 0.85]
+                 Off-Heap 사용률이 85%를 넘으면 Eviction 즉시 시작.
+                 ▸ 0.70 이하: 너무 자주 Eviction → Cache Hit율 저하 → Latency 증가
+                 ▸ 0.95 이상: Eviction 시작이 늦음 → 빈 페이지 부족 → Latency Spike
+                 ▸ 0.85     : 충분한 여유로 Eviction을 미리 시작 (프로덕션 권장값)
+
+                 [emptyPagesPoolSize = 100]
+                 Eviction 후 즉시 재사용 가능한 빈 페이지 최소 보유 수.
+                 신규 Kafka 메시지 Write 시 빈 페이지를 즉시 제공 → Latency Spike 방지.
+            ──────────────────────────────────────────────────────────────── -->
+            <property name="pageEvictionMode"   value="RANDOM_2_LRU"/>
+            <property name="evictionThreshold"  value="0.85"/>
+            <property name="emptyPagesPoolSize" value="100"/>
+
+            <!-- JMX → Prometheus/Grafana 연동용 메트릭 (Off-Heap 사용률, Eviction 횟수 등) -->
+            <property name="metricsEnabled" value="true"/>
+          </bean>
+        </property>
+
+      </bean>
+    </property>
+
+    <!-- ======================================================================
+         [6] Cache 구성 — Kafka Ingest 인메모리 Hot 버퍼
+
+         ┌─ Cache Group ("eds_hot_group") 활용 ────────────────────────────────┐
+         │  PME(Partition Map Exchange)는 "캐시 그룹" 단위로 발생한다.          │
+         │  동일 groupName의 캐시 N개 → PME 1회(그룹 단위)로 통합              │
+         │  향후 도메인별 캐시 추가 시 groupName을 동일하게 지정하면 됨        │
+         └─────────────────────────────────────────────────────────────────────┘
+
+         ┌─ RendezvousAffinityFunction / 1024 파티션 ──────────────────────────┐
+         │  ▸ Rendezvous Hashing: 노드 증감 시 최소한의 파티션만 재분배        │
+         │  ▸ 1024 파티션: Trino의 병렬 스캔 스레드 수와 맞춤.                │
+         │    (예) 4노드 × 256 = 1024 / 8노드 × 128 = 1024 균등 분배         │
+         └─────────────────────────────────────────────────────────────────────┘
+
+         ⚠️  캐시 이름 "kafka-hot-cache"에 하이픈(-)이 포함됨.
+             Trino/Ignite SQL에서 조회 시 반드시 큰따옴표로 감싸야 함:
+             SELECT * FROM ignite.PUBLIC."kafka-hot-cache"
+    ====================================================================== -->
+    <property name="cacheConfiguration">
+      <list>
+
+        <bean class="org.apache.ignite.configuration.CacheConfiguration">
+          <!-- KafkaStreamer 코드의 CACHE_NAME 상수와 반드시 일치해야 함 -->
+          <property name="name"      value="kafka-hot-cache"/>
+          <property name="groupName" value="eds_hot_group"/>
+
+          <!--
+               PARTITIONED: 데이터를 노드에 분산 저장. 수평 확장 가능.
+               REPLICATED 대비 메모리 효율이 높고, Kafka Write Heavy 환경에 적합.
+          -->
+          <property name="cacheMode" value="PARTITIONED"/>
+
+          <!--
+               ATOMIC: Kafka 단순 Key-Value PUT 연산에 최적.
+               TRANSACTIONAL(2PC)보다 약 30~40% 높은 쓰기 처리량.
+               단, 다중 키 원자적 업데이트가 필요 없으면 ATOMIC 선택.
+          -->
+          <property name="atomicityMode" value="ATOMIC"/>
+
+          <!-- 백업 1개: 노드 1대 다운 시 서비스 중단 없이 계속 운용 가능 -->
+          <property name="backups" value="1"/>
+
+          <!--
+               READ_WRITE_SAFE: 백업 수를 초과하는 다중 노드 장애 시에도
+                 ▸ 살아있는 파티션 → 정상적으로 읽기/쓰기 허용
+                 ▸ 손실된 파티션 → 예외 발생 (Dirty Read 방지)
+               IGNORE 대비 안전하고, READ_ONLY 대비 쓰기 가용성 보장.
+          -->
+          <property name="partitionLossPolicy" value="READ_WRITE_SAFE"/>
+
+          <!--
+               readFromBackup=true:
+               Trino 병렬 스캔 시 쿼리 부하가 프라이머리 + 백업 노드에 분산됨.
+               프라이머리 노드 핫스팟 방지 및 전체 스캔 처리량 향상.
+          -->
+          <property name="readFromBackup" value="true"/>
+
+          <!--
+               copyOnRead=false:
+               캐시에서 읽은 객체를 복사하지 않고 직접 참조 반환 → 복사 비용 제거.
+               Trino/Spark가 데이터를 읽기만 하는 패턴에서 성능 향상.
+               반환된 객체를 외부에서 변경하지 않는 경우에만 안전.
+          -->
+          <property name="copyOnRead" value="false"/>
+
+          <!--
+               queryParallelism=4:
+               Trino가 Ignite SQL을 실행할 때 이 캐시에서 병렬 스캔하는 스레드 수.
+               노드 CPU 코어 수의 절반 정도로 설정 권장 (과도하면 CPU/GC 경합 유발).
+          -->
+          <property name="queryParallelism" value="4"/>
+
+          <property name="affinity">
+            <bean class="org.apache.ignite.cache.affinity.rendezvous.RendezvousAffinityFunction">
+              <!--
+                   1024 파티션: 4~8노드 클러스터에서 노드당 128~256 파티션 균등 배분.
+                   Trino 병렬 스캔 스레드 수와 맞추어 스캔 처리량 극대화.
+              -->
+              <property name="partitions" value="1024"/>
+              <!--
+                   excludeNeighbors:
+                   false(현재): 소규모 클러스터 또는 단일 노드 테스트 환경에서 안전한 기본값.
+                   true로 변경 시: 프라이머리와 백업을 반드시 다른 물리 호스트에 배치.
+                                   노드 어피니티 또는 랙 인식 토폴로지 설정 시 권장.
+              -->
+              <property name="excludeNeighbors" value="false"/>
+            </bean>
+          </property>
+
+          <!-- Trino Ignite 카탈로그 및 JDBC SQL 접근을 위한 PUBLIC 스키마 등록 -->
+          <property name="sqlSchema" value="PUBLIC"/>
+
+          <!-- 캐시 히트율, 미스율, Eviction 횟수 메트릭 수집 (모니터링 필수) -->
+          <property name="statisticsEnabled" value="true"/>
+
+          <!-- ── TTL 기반 자동 만료 (선택 설정) ──────────────────────────────
+               Off-Heap Eviction과 별개로 일정 시간 경과 후 자동 삭제.
+               예: Kafka 인입 후 24시간 지난 Hot 데이터 자동 만료.
+               필요 시 아래 주석 해제하여 사용.
+
+          <property name="expiryPolicyFactory">
+            <bean class="javax.cache.expiry.CreatedExpiryPolicy" factory-method="factoryOf">
+              <constructor-arg>
+                <bean class="javax.cache.expiry.Duration">
+                  <constructor-arg value="HOURS"/>
+                  <constructor-arg value="24"/>
+                </bean>
+              </constructor-arg>
+            </bean>
+          </property>
+          ──────────────────────────────────────────────────────────────────── -->
+        </bean>
+
+        <!-- ── 추가 캐시 템플릿 ────────────────────────────────────────────────
+             도메인별 캐시가 추가될 때 이 패턴으로 복사하여 확장.
+             groupName을 동일하게 유지하면 PME가 그룹 단위로 통합됨.
+
+        <bean class="org.apache.ignite.configuration.CacheConfiguration">
+          <property name="name"                value="another-domain-cache"/>
+          <property name="groupName"           value="eds_hot_group"/>
+          <property name="cacheMode"           value="PARTITIONED"/>
+          <property name="atomicityMode"       value="ATOMIC"/>
+          <property name="backups"             value="1"/>
+          <property name="partitionLossPolicy" value="READ_WRITE_SAFE"/>
+          <property name="readFromBackup"      value="true"/>
+          <property name="copyOnRead"          value="false"/>
+          <property name="queryParallelism"    value="4"/>
+          <property name="affinity">
+            <bean class="org.apache.ignite.cache.affinity.rendezvous.RendezvousAffinityFunction">
+              <property name="partitions"       value="1024"/>
+              <property name="excludeNeighbors" value="false"/>
+            </bean>
+          </property>
+          <property name="sqlSchema"         value="PUBLIC"/>
+          <property name="statisticsEnabled" value="true"/>
+        </bean>
+        ──────────────────────────────────────────────────────────────────────── -->
+
+      </list>
+    </property>
+
+    <!-- ======================================================================
+         [7] SQL 설정 — Trino Federation 쿼리 모니터링
+
+         longQueryWarningTimeout=5000:
+           5초를 초과하는 SQL 쿼리를 경고 로그로 기록.
+           Trino Federated Join이나 Spark SQL에서 병목 쿼리 식별에 활용.
+           임계값 초과 시 인덱스 추가, queryParallelism 증가, 파티션 수 조정 검토.
+    ====================================================================== -->
+    <property name="sqlConfiguration">
+      <bean class="org.apache.ignite.configuration.SqlConfiguration">
+        <property name="longQueryWarningTimeout" value="5000"/>
+      </bean>
+    </property>
+
+    <!--
+         메트릭 갱신/로그 출력 주기:
+         - metricsUpdateFrequency : Prometheus 스크랩 주기와 맞추어 5초 설정
+         - metricsLogFrequency    : 콘솔 로그 출력 주기. 60초로 설정해 로그 노이즈 최소화.
+    -->
+    <property name="metricsUpdateFrequency" value="5000"/>
+    <property name="metricsLogFrequency"    value="60000"/>
+
+    <!-- 임시 파일, 힙 덤프 저장 경로 (PVC 마운트 경로와 일치해야 함) -->
+    <property name="workDirectory" value="/opt/ignite/work"/>
+
+  </bean>
+</beans>

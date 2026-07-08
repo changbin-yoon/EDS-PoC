@@ -1,0 +1,338 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ignite
+---
+# ============================================================================
+# RBAC — TcpDiscoveryKubernetesIpFinder 가 Kubernetes API를 호출하는 데 필요
+#
+# 동작 원리:
+#   Ignite Pod 기동 시 Service Account 토큰으로 Kubernetes API Server에 인증 후
+#   GET /api/v1/namespaces/ignite/endpoints/ignite-service 를 호출하여
+#   헤드리스 서비스의 엔드포인트 Pod IP 목록을 가져와 클러스터를 구성한다.
+#
+# 필요 권한: endpoints, pods 의 get / list / watch
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ignite-sa
+  namespace: ignite
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ignite-discovery-role
+  namespace: ignite
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ignite-discovery-rolebinding
+  namespace: ignite
+subjects:
+  - kind: ServiceAccount
+    name: ignite-sa
+    namespace: ignite
+roleRef:
+  kind: Role
+  name: ignite-discovery-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# ============================================================================
+# ConfigMap — ignite-config.xml 과 동기화 유지
+# 설정 변경 시 ignite-config.xml 과 이 ConfigMap 을 함께 수정할 것
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ignite-config
+  namespace: ignite
+data:
+  ignite-config.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!--
+      Apache Ignite 2.x — 32GB 노드 최적화 프로덕션 인메모리 버퍼 설정
+      노드 메모리 : 32GB (OS 3GB + JVM Heap 6GB + Off-Heap 23GB)
+      아키텍처   : Kafka ──[IgniteKafkaStreamer]──▶ Ignite(Hot Buffer)
+                                                       ◀── Spark (Bulk Scan → Iceberg/S3)
+                                                       ◀── Trino (Hot Query + Federation)
+    -->
+    <beans xmlns="http://www.springframework.org/schema/beans"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xsi:schemaLocation="
+             http://www.springframework.org/schema/beans
+             http://www.springframework.org/schema/beans/spring-beans.xsd">
+
+      <bean class="org.apache.ignite.configuration.IgniteConfiguration">
+
+        <property name="igniteInstanceName" value="eds-ignite-cluster"/>
+
+        <!-- [1] PME 방지 — Failure Detection 타임아웃 -->
+        <property name="failureDetectionTimeout"       value="30000"/>
+        <property name="clientFailureDetectionTimeout" value="30000"/>
+        <property name="systemWorkerBlockedTimeout"    value="30000"/>
+
+        <property name="failureHandler">
+          <bean class="org.apache.ignite.failure.StopNodeOrHaltFailureHandler">
+            <property name="tryStop" value="true"/>
+          </bean>
+        </property>
+
+        <!-- [2] Discovery SPI — TcpDiscoveryKubernetesIpFinder (K8s 자동 클러스터링)
+             Pod IP가 재기동 시마다 변경되는 K8s 환경에서 정적 IP 관리 불필요.
+             HPA 적용 시 신규 Pod 자동 탐지 가능.
+             사전 요구사항: ignite-sa ServiceAccount에 endpoints/pods 권한 필요 (위 RBAC 참조) -->
+        <property name="discoverySpi">
+          <bean class="org.apache.ignite.spi.discovery.tcp.TcpDiscoverySpi">
+            <property name="localPort"      value="47500"/>
+            <property name="networkTimeout" value="30000"/>
+            <property name="socketTimeout"  value="10000"/>
+            <property name="ackTimeout"     value="10000"/>
+            <property name="maxAckTimeout"  value="60000"/>
+            <property name="reconnectCount" value="10"/>
+            <property name="joinTimeout"    value="60000"/>
+            <property name="ipFinder">
+              <bean class="org.apache.ignite.spi.discovery.tcp.ipfinder.kubernetes.TcpDiscoveryKubernetesIpFinder">
+                <!-- Ignite Pod 가 배포된 Kubernetes 네임스페이스 -->
+                <property name="namespace"   value="ignite"/>
+                <!-- 헤드리스 서비스 이름 — 아래 Service(ignite-service)와 반드시 일치 -->
+                <property name="serviceName" value="ignite-service"/>
+              </bean>
+            </property>
+          </bean>
+        </property>
+
+        <!-- [3] Communication SPI -->
+        <property name="communicationSpi">
+          <bean class="org.apache.ignite.spi.communication.tcp.TcpCommunicationSpi">
+            <property name="localPort"          value="47100"/>
+            <property name="connectTimeout"     value="10000"/>
+            <property name="maxConnectTimeout"  value="30000"/>
+            <property name="reconnectCount"     value="10"/>
+            <property name="socketWriteTimeout" value="30000"/>
+            <property name="messageQueueLimit"  value="1024"/>
+            <property name="connectionsPerNode" value="4"/>
+          </bean>
+        </property>
+
+        <!-- [4] Client Connector — Thin Client(KafkaStreamer) + JDBC(Trino) -->
+        <property name="clientConnectorConfiguration">
+          <bean class="org.apache.ignite.configuration.ClientConnectorConfiguration">
+            <property name="port"                        value="10800"/>
+            <property name="threadPoolSize"              value="8"/>
+            <property name="maxOpenCursorsPerConnection" value="512"/>
+            <property name="thinClientEnabled"           value="true"/>
+            <property name="jdbcEnabled"                 value="true"/>
+            <property name="odbcEnabled"                 value="false"/>
+          </bean>
+        </property>
+
+        <!-- [5] DataStorage — 32GB 노드 Pure In-Memory (Off-Heap 23GB)
+             OS 3GB + JVM Heap 6GB + Off-Heap 23GB = 32GB -->
+        <property name="dataStorageConfiguration">
+          <bean class="org.apache.ignite.configuration.DataStorageConfiguration">
+            <!-- pageSize 8KB: Spark/Trino 대량 스캔 시 순차 I/O 효율 향상 -->
+            <property name="pageSize" value="8192"/>
+            <property name="walMode"  value="NONE"/>
+            <property name="defaultDataRegionConfiguration">
+              <bean class="org.apache.ignite.configuration.DataRegionConfiguration">
+                <property name="name"               value="default_region"/>
+                <property name="persistenceEnabled" value="false"/>
+                <!-- initialSize: 4GB 사전 확보, maxSize: 23GB = 24,696,061,952 bytes -->
+                <property name="initialSize" value="#{4L * 1024 * 1024 * 1024}"/>
+                <property name="maxSize"     value="24696061952"/>
+                <!-- RANDOM_2_LRU: Hot 데이터 보호 최적 Eviction 정책 (85% 도달 시 작동) -->
+                <property name="pageEvictionMode"   value="RANDOM_2_LRU"/>
+                <property name="evictionThreshold"  value="0.85"/>
+                <property name="emptyPagesPoolSize" value="100"/>
+                <property name="metricsEnabled"     value="true"/>
+              </bean>
+            </property>
+          </bean>
+        </property>
+
+        <!-- [6] Cache — kafka-hot-cache
+             ⚠️ SQL 접근 시 하이픈(-) 때문에 큰따옴표 필요:
+                SELECT * FROM ignite.PUBLIC."kafka-hot-cache" -->
+        <property name="cacheConfiguration">
+          <list>
+            <bean class="org.apache.ignite.configuration.CacheConfiguration">
+              <property name="name"                value="kafka-hot-cache"/>
+              <property name="groupName"           value="eds_hot_group"/>
+              <property name="cacheMode"           value="PARTITIONED"/>
+              <property name="atomicityMode"       value="ATOMIC"/>
+              <property name="backups"             value="1"/>
+              <property name="partitionLossPolicy" value="READ_WRITE_SAFE"/>
+              <property name="readFromBackup"      value="true"/>
+              <property name="copyOnRead"          value="false"/>
+              <property name="queryParallelism"    value="4"/>
+              <property name="affinity">
+                <bean class="org.apache.ignite.cache.affinity.rendezvous.RendezvousAffinityFunction">
+                  <!-- 1024 파티션: 4노드×256, 8노드×128 균등 분배. Trino 병렬 스캔 최적화 -->
+                  <property name="partitions"       value="1024"/>
+                  <property name="excludeNeighbors" value="false"/>
+                </bean>
+              </property>
+              <property name="sqlSchema"         value="PUBLIC"/>
+              <property name="statisticsEnabled" value="true"/>
+            </bean>
+          </list>
+        </property>
+
+        <!-- [7] SQL 설정 — 5초 초과 쿼리 경고 로그 -->
+        <property name="sqlConfiguration">
+          <bean class="org.apache.ignite.configuration.SqlConfiguration">
+            <property name="longQueryWarningTimeout" value="5000"/>
+          </bean>
+        </property>
+
+        <property name="metricsUpdateFrequency" value="5000"/>
+        <property name="metricsLogFrequency"    value="60000"/>
+        <property name="workDirectory"          value="/opt/ignite/work"/>
+
+      </bean>
+    </beans>
+---
+# ============================================================================
+# 헤드리스 서비스 — TcpDiscoveryKubernetesIpFinder 가 참조하는 엔드포인트 소스
+# StatefulSet 의 serviceName 과 일치 → Pod DNS 안정화
+# (ignite-config.xml 의 serviceName="ignite-service" 와 반드시 동일해야 함)
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: ignite-service
+  namespace: ignite
+  labels:
+    app: ignite
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true   # 기동 중 Pod도 즉시 엔드포인트 등록 → 클러스터 조인 빠름
+  selector:
+    app: ignite
+  ports:
+    - name: discovery
+      port: 47500
+      targetPort: 47500
+    - name: communication
+      port: 47100
+      targetPort: 47100
+    - name: jdbc
+      port: 10800
+      targetPort: 10800
+---
+# Trino / Spark / Kafka Thin Client 외부 접근용 ClusterIP 서비스
+apiVersion: v1
+kind: Service
+metadata:
+  name: ignite-svc
+  namespace: ignite
+  labels:
+    app: ignite
+spec:
+  selector:
+    app: ignite
+  ports:
+    - name: jdbc
+      port: 10800
+      targetPort: 10800
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ignite-cluster
+  namespace: ignite
+spec:
+  replicas: 1
+  serviceName: ignite-service   # 헤드리스 서비스와 일치 → Pod DNS: ignite-cluster-N.ignite-service.ignite.svc.cluster.local
+  selector:
+    matchLabels:
+      app: ignite
+  template:
+    metadata:
+      labels:
+        app: ignite
+    spec:
+      # TcpDiscoveryKubernetesIpFinder 가 K8s API 호출에 사용하는 ServiceAccount
+      serviceAccountName: ignite-sa
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: ignite-node
+          image: apacheignite/ignite:2.18.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CONFIG_URI
+              value: /opt/ignite/custom-config/ignite-config.xml
+            - name: IGNITE_QUIET
+              value: "false"
+            # ignite-kubernetes 모듈 활성화 (TcpDiscoveryKubernetesIpFinder 클래스 포함)
+            - name: OPTION_LIBS
+              value: "ignite-kubernetes"
+            # ── JVM 힙 설정 ──────────────────────────────────────────────────
+            # 32GB 노드 메모리 레이아웃:
+            #   OS 마진   : 3GB
+            #   JVM Heap  : 6GB  ← -Xms6g -Xmx6g
+            #   Off-Heap  : 23GB (ignite-config.xml maxSize와 정합)
+            # G1GC: 6GB Heap에서 STW Pause 최소화. DisableExplicitGC: System.gc() 무시
+            - name: JVM_OPTS
+              value: >-
+                -Xms6g
+                -Xmx6g
+                -XX:+UseG1GC
+                -XX:G1HeapRegionSize=32m
+                -XX:+DisableExplicitGC
+                -XX:+HeapDumpOnOutOfMemoryError
+                -XX:HeapDumpPath=/opt/ignite/work/heap.hprof
+          ports:
+            - name: discovery
+              containerPort: 47500
+            - name: communication
+              containerPort: 47100
+            - name: jdbc
+              containerPort: 10800
+          volumeMounts:
+            - name: config-vol
+              mountPath: /opt/ignite/custom-config/ignite-config.xml
+              subPath: ignite-config.xml
+            - name: work
+              mountPath: /opt/ignite/work
+          # ── 리소스 — 32GB 노드 기준 ────────────────────────────────────────
+          # JVM Heap(6GB) + Off-Heap(23GB) = 29GB 최소 필요
+          # limits.memory 30Gi = 29GB + OS 오버헤드 여유
+          # ⚠️ 다른 노드 스펙에서는 ignite-config.xml maxSize와 함께 재산정 필요
+          resources:
+            requests:
+              cpu: "1"
+              memory: "8Gi"
+            limits:
+              cpu: "4"
+              memory: "30Gi"
+          readinessProbe:
+            tcpSocket:
+              port: 10800
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 10800
+            initialDelaySeconds: 60
+            periodSeconds: 30
+      volumes:
+        - name: config-vol
+          configMap:
+            name: ignite-config
+  volumeClaimTemplates:
+    - metadata:
+        name: work
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: csi-cinder-sc-retain
+        resources:
+          requests:
+            storage: 10Gi

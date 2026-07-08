@@ -1,0 +1,127 @@
+# trinodb/trino Helm Chart values
+# Chart version : 1.42.0  (Trino 479)
+# 배포 명령어:
+#   helm repo add trino https://trinodb.github.io/charts
+#   kubectl apply -f trino/redis-tables-cm.yaml   # 사전 적용 필요
+#   helm upgrade --install trino trino/trino --version 1.42.0 \
+#     -f trino/trino-values.yaml -n trino --create-namespace
+
+# ── 이미지 ────────────────────────────────────────────────────────────────────
+image:
+  repository: trinodb/trino
+  tag: ""          # 비워두면 chart default(479) 사용. 481 고정 시 "481"로 설정.
+  pullPolicy: IfNotPresent
+
+# ── 단일 노드 모드 (Worker 0개, Coordinator가 실행도 담당) ───────────────────
+server:
+  workers: 0
+  node:
+    environment: production
+    dataDir: /data/trino
+  log:
+    trino:
+      level: INFO
+  config:
+    query:
+      maxMemory: "1GB"
+
+# ── Coordinator ───────────────────────────────────────────────────────────────
+coordinator:
+  config:
+    nodeScheduler:
+      includeCoordinator: true   # 단일 노드 핵심 설정
+    query:
+      maxMemoryPerNode: "512MB"
+
+  jvm:
+    maxHeapSize: "1600M"         # 컨테이너 메모리 2Gi의 ~80%
+    gcMethod:
+      type: "UseG1GC"
+      g1:
+        heapRegionSize: "32M"
+
+  # Ignite JDBC 드라이버 Java 모듈 접근 + Trino 481(Java 25) 호환 플래그
+  additionalJVMConfig:
+    - -XX:+ExplicitGCInvokesConcurrent
+    - -XX:+ExitOnOutOfMemoryError
+    - -XX:+HeapDumpOnOutOfMemoryError
+    - -XX:-OmitStackTraceInFastThrow
+    - -XX:ReservedCodeCacheSize=512M
+    - -XX:PerMethodRecompilationCutoff=10000
+    - -XX:PerBytecodeRecompilationCutoff=10000
+    - -Djdk.attach.allowAttachSelf=true
+    - -Djdk.nio.maxCachedBufferSize=2000000
+    - -XX:+UnlockDiagnosticVMOptions
+    - "--add-opens=java.base/java.nio=ALL-UNNAMED"
+    - "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+    - "--add-opens=java.base/java.lang=ALL-UNNAMED"
+    - "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED"
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+
+  # Redis 테이블 정의 JSON 디렉토리 마운트
+  # trino/redis-tables-cm.yaml 를 먼저 적용해야 함
+  additionalVolumes:
+    - name: redis-tables
+      configMap:
+        name: trino-redis-tables
+
+  additionalVolumeMounts:
+    - name: redis-tables
+      mountPath: /etc/trino/redis-tables
+
+# ── Worker — 단일 노드 모드에서는 사용 안 함 ─────────────────────────────────
+worker:
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+
+# ── 카탈로그 ──────────────────────────────────────────────────────────────────
+# Redis 키 형식 규칙:
+#   redis.default-schema=default 설정 시, default 스키마 테이블은 스키마 프리픽스 생략
+#   → users 테이블 키: "users:<id>"  (default:users:<id> 아님)
+catalogs:
+  ignite: |
+    connector.name=ignite
+    connection-url=jdbc:ignite:thin://ignite-svc.ignite.svc.cluster.local:10800
+    connection-user=eds
+    connection-password=edsuser123
+
+  postgresql: |
+    connector.name=postgresql
+    connection-url=jdbc:postgresql://eds-pg-rw.cnpg.svc.cluster.local:5432/eds
+    connection-user=eds
+    connection-password=edsuser123
+
+  redis: |
+    connector.name=redis
+    redis.nodes=redis-svc.redis.svc.cluster.local:6379
+    redis.password=edsuser123
+    redis.default-schema=default
+    redis.table-description-dir=/etc/trino/redis-tables
+    redis.hide-internal-columns=false
+    redis.key-prefix-schema-table=true
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+  hosts:
+    - host: trino.dev-cluster.k8s.miribit.lab
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []

@@ -1,0 +1,29 @@
+# Values for kubeflow/spark-operator
+# Namespace: operator-spark
+
+controller:
+  replicas: 1
+
+webhook:
+  enable: true
+
+prometheus:
+  metrics:
+    enable: true
+    port: 8080
+    portName: metrics
+    endpoint: /metrics
+
+  podMonitor:
+    create: true
+    labels: {}
+    jobLabel: spark-operator-podmonitor
+    podMetricsEndpoint:
+      scheme: http
+      interval: 30s
+
+spark:
+  jobNamespaces:
+    - spark-jobs
+  serviceAccount:
+    create: true

@@ -1,0 +1,66 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: word-count-script
+  namespace: spark-jobs
+data:
+  word_count.py: |
+    from pyspark.sql import SparkSession
+
+    spark = SparkSession.builder.appName("WordCount").getOrCreate()
+
+    lines = spark.sparkContext.parallelize([
+        "hello world hello spark",
+        "word count example with spark",
+        "spark is great for big data",
+        "hello from kubernetes spark cluster",
+        "word count running on spark operator",
+    ])
+
+    counts = (
+        lines.flatMap(lambda line: line.split(" "))
+             .map(lambda word: (word, 1))
+             .reduceByKey(lambda a, b: a + b)
+             .sortBy(lambda x: -x[1])
+    )
+
+    print("\n=== Word Count Results ===")
+    for word, count in counts.collect():
+        print(f"  {word}: {count}")
+    print("=========================\n")
+
+    spark.stop()
+---
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: word-count
+  namespace: spark-jobs
+spec:
+  type: Python
+  mode: cluster
+  image: apache/spark:3.5.5
+  imagePullPolicy: IfNotPresent
+  mainApplicationFile: local:///opt/spark-scripts/word_count.py
+  sparkVersion: "3.5.5"
+  restartPolicy:
+    type: Never
+  volumes:
+    - name: script
+      configMap:
+        name: word-count-script
+  driver:
+    cores: 1
+    memory: 512m
+    serviceAccount: spark-operator-spark
+    volumeMounts:
+      - name: script
+        mountPath: /opt/spark-scripts
+  executor:
+    cores: 1
+    instances: 1
+    memory: 512m
+    volumeMounts:
+      - name: script
+        mountPath: /opt/spark-scripts

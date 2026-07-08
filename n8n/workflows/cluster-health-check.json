@@ -1,0 +1,75 @@
+{
+  "name": "K8s Cluster Health Check",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "8e6f1b1a-0001-4a1a-9c1a-000000000001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-200, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/query",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "query", "value": "count(kube_node_info)" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8e6f1b1a-0001-4a1a-9c1a-000000000002",
+      "name": "Node Count",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [80, 140]
+    },
+    {
+      "parameters": {
+        "url": "http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/query",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "query", "value": "sum(kube_pod_status_phase{phase=\"Running\"})" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8e6f1b1a-0001-4a1a-9c1a-000000000003",
+      "name": "Running Pod Count",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [80, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/query",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "query", "value": "avg(1 - rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8e6f1b1a-0001-4a1a-9c1a-000000000004",
+      "name": "Cluster CPU Usage %",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [80, 460]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          { "node": "Node Count", "type": "main", "index": 0 },
+          { "node": "Running Pod Count", "type": "main", "index": 0 },
+          { "node": "Cluster CPU Usage %", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  }
+}

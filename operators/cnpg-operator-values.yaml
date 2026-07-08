@@ -1,0 +1,28 @@
+# Values for cnpg/cloudnative-pg
+# Namespace: operator-cnpg
+#
+# 주의: 기존 cnpg-system 네임스페이스의 CNPG 오퍼레이터와 별도로 배포됨.
+# 두 오퍼레이터가 동일한 CRD를 관리하면 충돌이 발생할 수 있으므로
+# 기존 cnpg-system 오퍼레이터를 먼저 제거한 뒤 이 values로 재배포할 것.
+
+# 오퍼레이터 레플리카 수
+replicaCount: 1
+
+# Prometheus 메트릭 수집 설정
+monitoring:
+  # PodMonitor 생성 (오퍼레이터 자체 메트릭)
+  podMonitorEnabled: true
+  podMonitorAdditionalLabels: {}
+
+  # Grafana 대시보드 ConfigMap 생성 (선택적)
+  grafanaDashboard:
+    create: false
+
+# 오퍼레이터가 감시하는 네임스페이스 (빈 값 = 모든 네임스페이스)
+# 특정 네임스페이스만 감시하려면 아래 주석 해제
+# watchNamespaces:
+#   - n8n
+
+# CRD 관리 (Helm으로 CRD도 함께 설치)
+crds:
+  create: true

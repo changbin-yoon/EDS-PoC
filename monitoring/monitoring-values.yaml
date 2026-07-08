@@ -1,0 +1,17 @@
+# Values for prometheus-community/kube-prometheus-stack.
+# Deploys Prometheus Operator, Prometheus, Alertmanager, Grafana, node-exporter
+# (as a DaemonSet on every node), and kube-state-metrics.
+
+grafana:
+  enabled: true
+
+nodeExporter:
+  enabled: true
+
+prometheus:
+  prometheusSpec:
+    retention: 10d
+    # No storageSpec: data lives in emptyDir and is lost on pod restart.
+    # Fine for a dev cluster; add a PVC here if Prometheus history needs to survive restarts.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false

@@ -1,0 +1,47 @@
+{
+  "name": "CNPG Operator Health",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "cc000003-0003-0003-0003-000000000001",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const PROM = 'http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/query';\n\nconst q = async (query) => {\n  const r = await $http.get({ url: PROM, qs: { query } });\n  const res = r.data.data.result;\n  return res.length > 0 ? parseFloat(res[0].value[1]) : 0;\n};\n\nconst qAll = async (query) => {\n  const r = await $http.get({ url: PROM, qs: { query } });\n  return r.data.data.result;\n};\n\n// 오퍼레이터 업 상태\nconst upResult    = await qAll('up{job=~\"operator-cnpg.*\"}');\nconst operatorUp  = upResult.filter(r => r.value[1] === '1').length;\nconst operatorTotal = upResult.length;\n\n// Reconcile 오류 합계 (controller별)\nconst reconcileErrors = await q('sum(controller_runtime_reconcile_errors_total{job=~\"operator-cnpg.*\"}) or vector(0)');\n\n// 1시간 신규 reconcile 오류\nconst newReconErrors = await q('sum(increase(controller_runtime_reconcile_errors_total{job=~\"operator-cnpg.*\"}[1h])) or vector(0)');\n\n// controller별 reconcile 성공 합계\nconst reconSuccessTotal = await q('sum(controller_runtime_reconcile_total{job=~\"operator-cnpg.*\",result=\"success\"}) or vector(0)');\nconst reconErrorTotal   = await q('sum(controller_runtime_reconcile_total{job=~\"operator-cnpg.*\",result=\"error\"}) or vector(0)');\n\n// cluster controller 성공 (n8n-pg 포함)\nconst clusterReconSuccess = await q('sum(controller_runtime_reconcile_total{job=~\"operator-cnpg.*\",controller=\"cluster\",result=\"success\"}) or vector(0)');\nconst clusterReconError   = await q('sum(controller_runtime_reconcile_total{job=~\"operator-cnpg.*\",controller=\"cluster\",result=\"error\"}) or vector(0)');\n\n// webhook 요청 (정상 동작 확인)\nconst webhookTotal = await q('sum(controller_runtime_webhook_requests_total{job=~\"operator-cnpg.*\"}) or vector(0)');\n\n// 1시간 reconcile timeout\nconst reconTimeouts = await q('sum(increase(controller_runtime_reconcile_timeouts_total{job=~\"operator-cnpg.*\"}[1h])) or vector(0)');\n\nconst alerts = [];\nif (operatorUp < operatorTotal) alerts.push(`🔴 오퍼레이터 Pod ${operatorTotal - operatorUp}개 다운`);\nif (newReconErrors > 0)         alerts.push(`⚠️ 최근 1h Reconcile 오류: ${newReconErrors}건`);\nif (reconTimeouts > 0)          alerts.push(`⚠️ 최근 1h Reconcile 타임아웃: ${reconTimeouts}건`);\nif (clusterReconError > 0)      alerts.push(`🔴 Cluster 컨트롤러 오류 누적: ${clusterReconError}건`);\n\nconst status = (operatorUp < operatorTotal || clusterReconError > 0) ? 'error'\n             : (newReconErrors > 0 || reconTimeouts > 0)             ? 'warning'\n             : 'ok';\n\nreturn [{ json: {\n  service: 'CloudNativePG Operator',\n  status,\n  metrics: { operatorUp, operatorTotal, reconcileErrors, newReconErrors, reconSuccessTotal, reconErrorTotal, clusterReconSuccess, clusterReconError, webhookTotal, reconTimeouts },\n  alerts\n}}];"
+      },
+      "id": "cc000003-0003-0003-0003-000000000002",
+      "name": "Collect CNPG Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Collect CNPG Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "JjfEa9AzXP7rc5te"
+}

@@ -1,0 +1,14 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: n8n-pg
+  namespace: n8n
+spec:
+  instances: 2                 # primary + standby
+  storage:
+    size: 10Gi
+    storageClass: csi-cinder-sc-retain
+  bootstrap:
+    initdb:
+      database: n8n
+      owner: n8n

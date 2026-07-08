@@ -1,0 +1,47 @@
+{
+  "name": "Spark Operator Health",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "aa000001-0001-0001-0001-000000000001",
+      "name": "When Called by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const PROM = 'http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/query';\n\nconst q = async (query) => {\n  const r = await $http.get({ url: PROM, qs: { query } });\n  const res = r.data.data.result;\n  return res.length > 0 ? parseFloat(res[0].value[1]) : 0;\n};\n\nconst qAll = async (query) => {\n  const r = await $http.get({ url: PROM, qs: { query } });\n  return r.data.data.result;\n};\n\n// 오퍼레이터 업 상태\nconst upResult = await qAll('up{job=~\"operator-spark.*\"}');\nconst operatorUp = upResult.filter(r => r.value[1] === '1').length;\nconst operatorTotal = upResult.length;\n\n// 애플리케이션 카운트\nconst totalApps    = await q('sum(spark_application_count) or vector(0)');\nconst runningApps  = await q('sum(spark_application_running_count) or vector(0)');\nconst failedApps   = await q('sum(spark_application_failure_count) or vector(0)');\nconst successApps  = await q('sum(spark_application_success_count) or vector(0)');\nconst submitCount  = await q('sum(spark_application_submit_count) or vector(0)');\nconst executorRun  = await q('sum(spark_executor_running_count) or vector(0)');\n\n// 1시간 신규 실패 (increase)\nconst newFailures  = await q('sum(increase(spark_application_failure_count[1h])) or vector(0)');\n\nconst alerts = [];\nif (operatorUp < operatorTotal) alerts.push(`🔴 오퍼레이터 Pod ${operatorTotal - operatorUp}개 다운`);\nif (newFailures > 0)            alerts.push(`⚠️ 최근 1h 신규 실패: ${newFailures}건`);\nif (failedApps > 0)             alerts.push(`📋 누적 실패 잡: ${failedApps}개`);\nif (runningApps > 0)            alerts.push(`🔄 현재 실행 중: ${runningApps}개`);\n\nconst status = operatorUp < operatorTotal ? 'error'\n             : newFailures > 0           ? 'warning'\n             : 'ok';\n\nreturn [{ json: {\n  service: 'Spark Operator',\n  status,\n  metrics: { operatorUp, operatorTotal, totalApps, runningApps, failedApps, successApps, submitCount, executorRun, newFailures },\n  alerts\n}}];"
+      },
+      "id": "aa000001-0001-0001-0001-000000000002",
+      "name": "Collect Spark Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "When Called by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Collect Spark Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "oOyl0KwREkVOnNMo"
+}

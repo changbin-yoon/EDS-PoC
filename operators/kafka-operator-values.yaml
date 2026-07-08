@@ -1,0 +1,9 @@
+# Values for strimzi/strimzi-kafka-operator
+# Namespace: operator-kafka
+
+# 모든 네임스페이스의 Kafka 리소스를 감시
+watchAnyNamespace: true
+
+logLevel: "${env:STRIMZI_LOG_LEVEL:-INFO}"
+
+# PodMonitor는 이 차트가 지원하지 않으므로 kafka-podmonitor.yaml로 별도 배포

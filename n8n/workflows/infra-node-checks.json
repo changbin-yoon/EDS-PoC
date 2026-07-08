@@ -1,0 +1,228 @@
+{
+  "name": "Infra + K8s Health Checks (Prometheus)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "b1a1a1a1-0001-4a1a-9c1a-000000000001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-400, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const PROM = {\n  cpu_busy:      `topk(10, 100 - avg by(instance)(rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))*100)`,\n  load_per_core: `topk(10, node_load5 / count by(instance)(node_cpu_seconds_total{mode=\"idle\"}))`,\n  mem_avail_pct: `bottomk(10, node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100)`,\n  disk_used_pct: `topk(10, 100 - node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes * 100)`,\n  inode_used:    `topk(10, 100 - node_filesystem_files_free / node_filesystem_files * 100)`,\n  disk_io_sat:   `topk(10, rate(node_disk_io_time_seconds_total[5m]))`,\n  net_err_drop:  `topk(10, rate(node_network_receive_errs_total[5m]) + rate(node_network_transmit_errs_total[5m]) + rate(node_network_receive_drop_total[5m]) + rate(node_network_transmit_drop_total[5m]))`,\n  conntrack_pct: `topk(10, node_nf_conntrack_entries / node_nf_conntrack_entries_limit * 100)`,\n};\nreturn Object.entries(PROM).map(([check, query]) => ({ json: { role: \"infra\", check, query } }));"
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-000000000002",
+      "name": "Build Prom Queries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, 140]
+    },
+    {
+      "parameters": {
+        "url": "http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/query",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "query", "value": "={{ $json.query }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-000000000003",
+      "name": "Query Prometheus",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [100, 140]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const role = $('Build Prom Queries').item.json.role;\nconst check = $('Build Prom Queries').item.json.check;\nconst query = $('Build Prom Queries').item.json.query;\nconst result = $json.data?.result ?? [];\n\nreturn {\n  json: {\n    role,\n    check,\n    query,\n    series_count: result.length,\n    top: result.slice(0, 5).map(r => ({ instance: r.metric.instance ?? null, value: Number(r.value[1]) }))\n  }\n};"
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-000000000004",
+      "name": "Attach Check Info",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [360, 140]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const PROM = {\n  pods_abnormal:   `count by(namespace,phase)(kube_pod_status_phase{phase!~\"Running|Succeeded\"}==1)`,\n  restarts_1h:     `topk(15, increase(kube_pod_container_status_restarts_total[1h]))`,\n  deploy_unavail:  `kube_deployment_spec_replicas - kube_deployment_status_replicas_available > 0`,\n  oomkilled:       `kube_pod_container_status_last_terminated_reason{reason=\"OOMKilled\"}==1`,\n  cfs_throttle_pct:`topk(15, rate(container_cpu_cfs_throttled_periods_total[5m]) / rate(container_cpu_cfs_periods_total[5m]) * 100)`,\n  mem_vs_limit_pct:`topk(15, container_memory_working_set_bytes / on(namespace,pod,container) kube_pod_container_resource_limits{resource=\"memory\"} * 100)`,\n  apiserver_5xx:   `sum(rate(apiserver_request_total{code=~\"5..\"}[5m]))`,\n  apiserver_p99:   `histogram_quantile(0.99, sum by(le,verb)(rate(apiserver_request_duration_seconds_bucket[5m])))`,\n  pending_pods:    `scheduler_pending_pods`,\n  // 님 스택 특화 — Spark/YuniKorn placeholder\n  spark_pending:   `count(kube_pod_status_phase{phase=\"Pending\", namespace=~\"spark.*\"}==1)`,\n};\nreturn Object.entries(PROM).map(([check, query]) => ({ json: { role: \"k8s\", check, query } }));"
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-000000000005",
+      "name": "Define Queries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, 460]
+    },
+    {
+      "parameters": {
+        "url": "http://monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/query",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "query", "value": "={{ $json.query }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-000000000006",
+      "name": "Query Prometheus (K8s)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [100, 460]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const queries   = $('Define Queries').all();   // 입력 순서 보존\nconst responses = $input.all();\nconst findings = [];\n\nresponses.forEach((res, i) => {\n  const meta = queries[i].json;                 // check / role\n  const result = res.json?.data?.result || [];\n  result.forEach(s => {\n    const m = s.metric || {};\n    findings.push({\n      check: meta.check,\n      node: m.node || m.instance || null,       // ← 조인 키\n      namespace: m.namespace || null,\n      pod: m.pod || null,\n      value: parseFloat(s.value?.[1]),\n    });\n  });\n});\nreturn [{ json: { role: queries[0].json.role, findings } }];"
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-000000000007",
+      "name": "Aggregate K8s Findings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [360, 460]
+    },
+    {
+      "parameters": {
+        "mode": "append"
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-000000000008",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [620, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return [{ json: { checked_at: new Date().toISOString(), report_data: items.map(i => i.json) } }];"
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-000000000009",
+      "name": "Collect For Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.5-flash",
+        "options": {}
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-00000000000a",
+      "name": "Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [980, 540],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "",
+          "name": "REPLACE WITH EXISTING GEMINI CREDENTIAL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableName": "agent_chat_histories",
+        "sessionIdType": "customKey",
+        "sessionKey": "=k8s-cluster-health-check",
+        "contextWindowLength": 150
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-00000000000b",
+      "name": "Postgres Chat Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryPostgresChat",
+      "typeVersion": 1.3,
+      "position": [1140, 540],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "REPLACE WITH EXISTING n8n-pg CREDENTIAL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=다음은 Kubernetes 클러스터 점검 결과(JSON, Prometheus 기반 infra/k8s 체크)입니다.\n점검 시각: {{ $json.checked_at }}\n\n{{ JSON.stringify($json.report_data, null, 2) }}\n\n위 데이터를 바탕으로 운영팀이 Slack에서 바로 읽을 수 있는 한국어 점검 보고서를 작성해줘.",
+        "options": {
+          "systemMessage": "너는 Kubernetes 클러스터를 점검하는 SRE 보조 에이전트다. 입력으로 받은 Prometheus 점검 결과(JSON)를 분석해서 간결한 한국어 보고서를 작성한다.\n- 정상 항목과 이상(임계치 초과·비정상 상태) 항목을 명확히 구분해서 표시한다.\n- 이상 항목은 수치, 영향받는 노드/네임스페이스/파드를 구체적으로 적고 우선순위(긴급/주의/참고)를 매긴다.\n- series_count가 0이거나 데이터가 비어 있는 체크는 '정상'이 아니라 '수집 실패 가능성'으로 별도 표시한다 (예: 메트릭 미수집).\n- 출력은 Slack 메시지로 바로 보낼 수 있도록 markdown(굵게는 *별표*, 코드블록은 백틱) 형식을 쓰고 너무 길지 않게 핵심 위주로 작성한다."
+        }
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-00000000000c",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2,
+      "position": [1100, 300]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_WITH_SLACK_CHANNEL_ID"
+        },
+        "text": "={{ $json.output }}",
+        "otherOptions": {}
+      },
+      "id": "b1a1a1a1-0001-4a1a-9c1a-00000000000d",
+      "name": "Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [1360, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "",
+          "name": "REPLACE WITH EXISTING SLACK CREDENTIAL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          { "node": "Build Prom Queries", "type": "main", "index": 0 },
+          { "node": "Define Queries", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Build Prom Queries": {
+      "main": [[{ "node": "Query Prometheus", "type": "main", "index": 0 }]]
+    },
+    "Query Prometheus": {
+      "main": [[{ "node": "Attach Check Info", "type": "main", "index": 0 }]]
+    },
+    "Attach Check Info": {
+      "main": [[{ "node": "Merge", "type": "main", "index": 0 }]]
+    },
+    "Define Queries": {
+      "main": [[{ "node": "Query Prometheus (K8s)", "type": "main", "index": 0 }]]
+    },
+    "Query Prometheus (K8s)": {
+      "main": [[{ "node": "Aggregate K8s Findings", "type": "main", "index": 0 }]]
+    },
+    "Aggregate K8s Findings": {
+      "main": [[{ "node": "Merge", "type": "main", "index": 1 }]]
+    },
+    "Merge": {
+      "main": [[{ "node": "Collect For Report", "type": "main", "index": 0 }]]
+    },
+    "Collect For Report": {
+      "main": [[{ "node": "AI Agent", "type": "main", "index": 0 }]]
+    },
+    "Gemini Chat Model": {
+      "ai_languageModel": [[{ "node": "AI Agent", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Postgres Chat Memory": {
+      "ai_memory": [[{ "node": "AI Agent", "type": "ai_memory", "index": 0 }]]
+    },
+    "AI Agent": {
+      "main": [[{ "node": "Slack", "type": "main", "index": 0 }]]
+    }
+  }
+}

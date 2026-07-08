@@ -1,0 +1,244 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trino
+---
+# ── Coordinator 설정 (단일 노드 모드 — Worker 없이 coordinator가 실행도 담당) ──
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trino-coordinator-config
+  namespace: trino
+data:
+  config.properties: |
+    coordinator=true
+    node-scheduler.include-coordinator=true
+    http-server.http.port=8080
+    query.max-memory=1GB
+    query.max-memory-per-node=512MB
+    discovery.uri=http://trino-coordinator.trino.svc.cluster.local:8080
+
+  node.properties: |
+    node.environment=production
+    node.id=trino-coordinator
+    node.data-dir=/data/trino
+
+  jvm.config: |
+    -server
+    -XX:InitialRAMPercentage=80
+    -XX:MaxRAMPercentage=80
+    -XX:G1HeapRegionSize=32M
+    -XX:+ExplicitGCInvokesConcurrent
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+HeapDumpOnOutOfMemoryError
+    -XX:-OmitStackTraceInFastThrow
+    -XX:ReservedCodeCacheSize=512M
+    -XX:PerMethodRecompilationCutoff=10000
+    -XX:PerBytecodeRecompilationCutoff=10000
+    -Djdk.attach.allowAttachSelf=true
+    -Djdk.nio.maxCachedBufferSize=2000000
+    -XX:+UnlockDiagnosticVMOptions
+    --add-opens=java.base/java.nio=ALL-UNNAMED
+    --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+    --add-opens=java.base/java.lang=ALL-UNNAMED
+    --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+
+  log.properties: |
+    io.trino=INFO
+---
+# ── 카탈로그 (Ignite / PostgreSQL / Redis) ────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trino-catalog
+  namespace: trino
+data:
+  ignite.properties: |
+    connector.name=ignite
+    connection-url=jdbc:ignite:thin://ignite-svc.ignite.svc.cluster.local:10800
+    connection-user=eds
+    connection-password=edsuser123
+
+  postgresql.properties: |
+    connector.name=postgresql
+    connection-url=jdbc:postgresql://eds-pg-rw.cnpg.svc.cluster.local:5432/eds
+    connection-user=eds
+    connection-password=edsuser123
+
+  redis.properties: |
+    connector.name=redis
+    redis.nodes=redis-svc.redis.svc.cluster.local:6379
+    redis.password=edsuser123
+    redis.default-schema=default
+    redis.table-description-dir=/etc/trino/redis-tables
+    redis.hide-internal-columns=false
+    redis.key-prefix-schema-table=true
+---
+# ── Redis 테이블 정의 (예시: default.users — Hash 타입) ──────────────────────
+# 키 형식: default:users:<id>  (redis.key-prefix-schema-table=true)
+# 데이터 삽입 예시:
+#   redis-cli -a edsuser123 HSET default:users:1 id 1 name "Alice" email "alice@example.com"
+#   redis-cli -a edsuser123 HSET default:users:2 id 2 name "Bob"   email "bob@example.com"
+# Trino 조회:
+#   SELECT * FROM redis.default.users;
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trino-redis-tables
+  namespace: trino
+data:
+  users.json: |
+    {
+      "tableName": "users",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "id",
+            "type": "bigint",
+            "mapping": "id"
+          },
+          {
+            "name": "name",
+            "type": "varchar",
+            "mapping": "name"
+          },
+          {
+            "name": "email",
+            "type": "varchar",
+            "mapping": "email"
+          }
+        ]
+      }
+    }
+---
+# ── Coordinator Service ────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: trino-coordinator
+  namespace: trino
+  labels:
+    app: trino
+    component: coordinator
+spec:
+  selector:
+    app: trino
+    component: coordinator
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# ── Coordinator Deployment ─────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trino-coordinator
+  namespace: trino
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trino
+      component: coordinator
+  template:
+    metadata:
+      labels:
+        app: trino
+        component: coordinator
+    spec:
+      containers:
+        - name: trino
+          image: trinodb/trino:481
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: config
+              mountPath: /etc/trino/config.properties
+              subPath: config.properties
+            - name: config
+              mountPath: /etc/trino/node.properties
+              subPath: node.properties
+            - name: config
+              mountPath: /etc/trino/jvm.config
+              subPath: jvm.config
+            - name: config
+              mountPath: /etc/trino/log.properties
+              subPath: log.properties
+            - name: catalog
+              mountPath: /etc/trino/catalog/ignite.properties
+              subPath: ignite.properties
+            - name: catalog
+              mountPath: /etc/trino/catalog/postgresql.properties
+              subPath: postgresql.properties
+            - name: catalog
+              mountPath: /etc/trino/catalog/redis.properties
+              subPath: redis.properties
+            - name: redis-tables
+              mountPath: /etc/trino/redis-tables
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          readinessProbe:
+            httpGet:
+              path: /v1/info
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /v1/info
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+      volumes:
+        - name: config
+          configMap:
+            name: trino-coordinator-config
+        - name: catalog
+          configMap:
+            name: trino-catalog
+        - name: redis-tables
+          configMap:
+            name: trino-redis-tables
+---
+# ── Trino UI Ingress ───────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: trino
+  namespace: trino
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: trino.dev-cluster.k8s.miribit.lab
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: trino-coordinator
+                port:
+                  number: 8080

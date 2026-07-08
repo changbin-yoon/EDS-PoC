@@ -1,0 +1,83 @@
+# community-charts/n8n Helm 차트용 설정값 (차트 1.22.2, 앱 2.25.7).
+# 참고: 이 차트의 스키마는 이전 8gears n8n-helm-chart 레이아웃과 무관하다
+# (main.config/main.extraEnv/valkey 블록 없음) - 차트의 values.schema.json 참고.
+
+image:
+  repository: yoochabi/n8n-python
+  pullPolicy: Always
+  tag: "latest"
+imagePullSecrets: []
+
+ingress:
+  enabled: true
+  className: "nginx"
+  hosts:
+    - host: n8n.dev-cluster.k8s.miribit.lab
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+timezone: "Asia/Seoul"
+
+# 비워두면 n8n이 최초 설치 시 키를 자동 생성하지만, 재설치 시에도 유지되도록
+# sealed n8n-secret의 N8N_ENCRYPTION_KEY 항목에 고정한다.
+encryptionKey: ""
+existingEncryptionKeySecret: "n8n-secret"
+
+workflowHistory:
+  enabled: true
+  pruneTime: 336
+
+# prometheus-operator CRD 없이도 N8N_METRICS를 노출한다;
+# ServiceMonitor 객체 자체는 해당 CRD가 존재할 때만 생성된다.
+serviceMonitor:
+  enabled: true
+
+db:
+  type: postgresdb
+  postgresdb:
+    poolSize: 2
+
+# pg-cluster.yaml의 CloudNativePG 클러스터; 비밀번호는 여기에 복제하지 않고
+# 자동 생성된 n8n-pg-app 시크릿에서 가져온다.
+postgresql:
+  enabled: false
+externalPostgresql:
+  host: n8n-pg-rw.n8n.svc.cluster.local
+  port: 5432
+  username: n8n
+  database: n8n
+  existingSecret: n8n-pg-app
+  existingSecretPasswordKey: password
+
+# redis.yaml의 독립형 Redis (인증 없음), Bull 큐용.
+redis:
+  enabled: false
+externalRedis:
+  host: n8n-redis.n8n.svc.cluster.local
+  port: 6379
+
+main:
+  persistence:
+    enabled: false
+  extraEnvVars:
+    TZ: "Asia/Seoul"
+    N8N_ENABLE_COMMUNITY_NODES: "true"
+    N8N_SECURE_COOKIE: "false"
+    EXECUTIONS_DATA_PRUNE: "true"
+    EXECUTIONS_DATA_MAX_AGE: "336"
+
+# 큐 실행 모드: main Pod가 UI/API를 처리하고, worker Pod(들)가 실행을 처리한다.
+worker:
+  mode: queue
+  count: 1
+  persistence:
+    enabled: false
+  extraEnvVars:
+    TZ: "Asia/Seoul"
+    N8N_ENABLE_COMMUNITY_NODES: "true"
+
+# 별도 webhook Pod 미사용; main Pod가 웹훅을 처리한다.
+webhook:
+  mode: regular

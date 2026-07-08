@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.eds</groupId>
+  <artifactId>kafka-ignite-ingester</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+  <description>Kafka → Apache Ignite 실시간 스트리밍 인제스터 (IgniteKafkaStreamer)</description>
+
+  <properties>
+    <maven.compiler.source>11</maven.compiler.source>
+    <maven.compiler.target>11</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Ignite 2.x 안정 버전 — ignite.yaml 이미지 태그와 맞추어 관리 -->
+    <ignite.version>2.18.0</ignite.version>
+    <!-- Ignite 2.18.0 의 ignite-kafka 내부 의존성 Kafka 클라이언트 버전 -->
+    <kafka.version>3.4.0</kafka.version>
+  </properties>
+
+  <dependencies>
+
+    <!-- ── Ignite Core ──────────────────────────────────────────────────────── -->
+    <dependency>
+      <groupId>org.apache.ignite</groupId>
+      <artifactId>ignite-core</artifactId>
+      <version>${ignite.version}</version>
+    </dependency>
+
+    <!-- ── ignite-kafka — KafkaStreamer 클래스 포함 ──────────────────────────
+         제공 클래스: org.apache.ignite.stream.kafka.KafkaStreamer
+         ⚠️ Ignite 공식 명칭: KafkaStreamer (IgniteKafkaStreamer 가 아님)
+         참고: https://ignite.apache.org/docs/latest/extensions-and-integrations/streaming/kafka-streamer -->
+    <dependency>
+      <groupId>org.apache.ignite</groupId>
+      <artifactId>ignite-kafka</artifactId>
+      <version>${ignite.version}</version>
+    </dependency>
+
+    <!-- ── ignite-kubernetes — TcpDiscoveryKubernetesIpFinder 클래스 포함 ────
+         XML 설정의 ipFinder 빈 인스턴스화에 필요.
+         클러스터 서버 모드로 구동할 때 클래스패스에 반드시 포함. -->
+    <dependency>
+      <groupId>org.apache.ignite</groupId>
+      <artifactId>ignite-kubernetes</artifactId>
+      <version>${ignite.version}</version>
+    </dependency>
+
+    <!-- ── Kafka Client ─────────────────────────────────────────────────────── -->
+    <dependency>
+      <groupId>org.apache.kafka</groupId>
+      <artifactId>kafka-clients</artifactId>
+      <version>${kafka.version}</version>
+    </dependency>
+
+    <!-- ── 로깅 ─────────────────────────────────────────────────────────────── -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>2.0.9</version>
+    </dependency>
+    <dependency>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-classic</artifactId>
+      <version>1.4.14</version>
+    </dependency>
+
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- Fat JAR 빌드 — 모든 의존성을 하나의 JAR 로 패키징 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.5.1</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>shade</goal></goals>
+            <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>io.eds.ignite.kafka.KafkaIgniteIngester</mainClass>
+                </transformer>
+                <!-- Spring XML 설정 파일 병합 (여러 ignite 모듈의 spring.handlers 충돌 방지) -->
+                <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
+                  <resource>META-INF/spring.handlers</resource>
+                </transformer>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.AppendingTransformer">
+                  <resource>META-INF/spring.schemas</resource>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+</project>
