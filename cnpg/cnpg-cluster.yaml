@@ -45,13 +45,25 @@ spec:
   storage:
     size: 20Gi
     storageClass: csi-cinder-sc-retain
+  # ignite StatefulSet과 동일한 스펙으로 맞춤 (공정한 엔진 간 비교를 위해).
+  # 리소스 limit만 올리는 건 의미 없음 — postgres 자신의 메모리 사용 설정
+  # (shared_buffers/work_mem)도 그만큼 올려줘야 실제로 더 쓴다.
+  # memory limit 16Gi 기준 shared_buffers는 통상 가이드(25%)에 맞춰 4GB로 설정.
   resources:
     requests:
-      cpu: "250m"
-      memory: "512Mi"
-    limits:
       cpu: "1"
-      memory: "1Gi"
+      memory: "8Gi"
+    limits:
+      cpu: "4"
+      memory: "16Gi"
+  postgresql:
+    parameters:
+      shared_buffers: "4GB"
+      work_mem: "256MB"
+      effective_cache_size: "12GB"
+      max_parallel_workers_per_gather: "4"
+      max_parallel_workers: "8"
+      max_worker_processes: "8"
   # ── 백업/WAL 아카이빙 (Barman Cloud, in-tree 방식) ──────────────────────────
   # CNPG 1.26+ 에서는 별도 Barman Cloud Plugin이 권장 경로지만, 그러려면 플러그인
   # 오퍼레이터/이미지를 추가로 배포해야 해서 airgap에서 준비할 이미지가 하나 더 늘어남.

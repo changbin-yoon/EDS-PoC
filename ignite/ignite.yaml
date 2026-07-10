@@ -92,8 +92,10 @@ data:
           </bean>
         </property>
 
-        <!-- [5] DataStorage — 32GB 노드, Native Persistence 활성화 (재기동 시 데이터 보존)
-             OS 3GB + JVM Heap 6GB + Off-Heap 23GB = 32GB
+        <!-- [5] DataStorage — 16Gi 파드 한도, Native Persistence 활성화 (재기동 시 데이터 보존)
+             OS/JVM 오버헤드 2GB + JVM Heap 4GB + Off-Heap 10GB = 16GB
+             (postgresql 파드와 memory limit을 16Gi로 맞추면서 함께 재산정 — PostgreSQL과의
+             공정한 비교를 위해 pod 리소스를 동일하게 맞추는 세션)
              persistence 켜짐 → walMode는 NONE 불가(내구성 보장 안 됨), LOG_ONLY로 변경.
              pageEvictionMode도 persistent region에서는 미지원(디스크 기반 page replacement로
              대체됨) → DISABLED로 변경, evictionThreshold/emptyPagesPoolSize 제거 -->
@@ -106,9 +108,9 @@ data:
               <bean class="org.apache.ignite.configuration.DataRegionConfiguration">
                 <property name="name"               value="default_region"/>
                 <property name="persistenceEnabled" value="true"/>
-                <!-- initialSize: 4GB 사전 확보, maxSize: 23GB = 24,696,061,952 bytes -->
-                <property name="initialSize" value="#{4L * 1024 * 1024 * 1024}"/>
-                <property name="maxSize"     value="24696061952"/>
+                <!-- initialSize: 2GB 사전 확보, maxSize: 10GB = 10,737,418,240 bytes -->
+                <property name="initialSize" value="#{2L * 1024 * 1024 * 1024}"/>
+                <property name="maxSize"     value="10737418240"/>
                 <property name="pageEvictionMode" value="DISABLED"/>
                 <property name="metricsEnabled"   value="true"/>
               </bean>
@@ -250,15 +252,15 @@ spec:
             - name: IGNITE_QUIET
               value: "false"
             # ── JVM 힙 설정 ──────────────────────────────────────────────────
-            # 32GB 노드 메모리 레이아웃:
-            #   OS 마진   : 3GB
-            #   JVM Heap  : 6GB  ← -Xms6g -Xmx6g
-            #   Off-Heap  : 23GB (ignite-config.xml maxSize와 정합)
-            # G1GC: 6GB Heap에서 STW Pause 최소화. DisableExplicitGC: System.gc() 무시
+            # 16Gi 파드 한도 메모리 레이아웃 (postgresql과 리소스 스펙 통일):
+            #   OS/JVM 오버헤드 : 2GB
+            #   JVM Heap  : 4GB  ← -Xms4g -Xmx4g
+            #   Off-Heap  : 10GB (ignite-config.xml maxSize와 정합)
+            # G1GC: STW Pause 최소화. DisableExplicitGC: System.gc() 무시
             - name: JVM_OPTS
               value: >-
-                -Xms6g
-                -Xmx6g
+                -Xms4g
+                -Xmx4g
                 -XX:+UseG1GC
                 -XX:G1HeapRegionSize=32m
                 -XX:+DisableExplicitGC
@@ -277,17 +279,17 @@ spec:
               subPath: ignite-config.xml
             - name: work
               mountPath: /opt/ignite/work
-          # ── 리소스 — 32GB 노드 기준 ────────────────────────────────────────
-          # JVM Heap(6GB) + Off-Heap(23GB) = 29GB 최소 필요
-          # limits.memory 30Gi = 29GB + OS 오버헤드 여유
-          # ⚠️ 다른 노드 스펙에서는 ignite-config.xml maxSize와 함께 재산정 필요
+          # ── 리소스 — postgresql(cnpg-cluster.yaml)과 동일 스펙으로 통일 ──────
+          # JVM Heap(4GB) + Off-Heap(10GB) = 14GB, limits.memory 16Gi로 여유 확보
+          # ⚠️ 리소스를 다시 바꾸면 ignite-config.xml의 initialSize/maxSize와
+          #    JVM_OPTS의 -Xms/-Xmx도 함께 재산정 필요
           resources:
             requests:
               cpu: "1"
               memory: "8Gi"
             limits:
               cpu: "4"
-              memory: "30Gi"
+              memory: "16Gi"
           readinessProbe:
             tcpSocket:
               port: 10800
@@ -303,6 +305,11 @@ spec:
         - name: config-vol
           configMap:
             name: ignite-config
+  # volumeClaimTemplates는 StatefulSet 불변 필드라 여기 값을 바꿔도 kubectl apply가
+  # 적용 못 함(기존 PVC와 다르면 전체 apply가 Forbidden 처리됨). 실제 PVC는
+  # `kubectl patch pvc work-ignite-cluster-0 -n ignite -p '{"spec":{"resources":{"requests":{"storage":"30Gi"}}}}'`
+  # 로 이미 30Gi로 직접 리사이즈해뒀음 — 아래 값은 최초 생성 시점 값(10Gi)과 일치시켜
+  # 향후 apply가 계속 성공하도록 유지.
   volumeClaimTemplates:
     - metadata:
         name: work
@@ -311,4 +318,4 @@ spec:
         storageClassName: csi-cinder-sc-retain
         resources:
           requests:
-            storage: 30Gi
+            storage: 10Gi

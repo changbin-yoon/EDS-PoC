@@ -132,6 +132,82 @@ GROUP BY에서 PostgreSQL이 2.6배 빠르게 나온 원인을 규명한 결과(
 
 ---
 
-## 5. 재현 방법
+## 5. 리소스 스펙 통일 + PostgreSQL 튜닝 후 재측정
+
+4장까지는 Ignite(cpu limit 4, memory limit 30Gi, JVM heap 6g)와 PostgreSQL(cpu limit 1, memory
+limit 1Gi, 기본 설정)의 리소스가 크게 달랐다 — 공정한 비교가 아니었다는 지적에 따라 **두 파드
+스펙을 동일하게(cpu limit 4, memory limit 16Gi) 맞추고**, PostgreSQL도 그 메모리를 실제로 쓰도록
+튜닝한 뒤 재측정했다.
+
+### 5-1. 적용한 설정
+
+| 항목 | Ignite | PostgreSQL |
+|---|---|---|
+| CPU request/limit | 1 / 4 | 1 / 4 |
+| Memory request/limit | 8Gi / 16Gi | 8Gi / 16Gi |
+| 힙/버퍼 | JVM heap 4g, off-heap max 10GB | `shared_buffers=4GB`, `work_mem=256MB`, `effective_cache_size=12GB` |
+| 병렬도 | `query_parallelism=4` | `max_parallel_workers_per_gather=4`, `max_parallel_workers=8` |
+
+Ignite는 메모리 limit을 30Gi→16Gi로 **줄였기** 때문에 힙(6g→4g)/off-heap(23GB→10GB)도 같이
+축소했다 — 이 자체가 하나의 변수가 된다(아래 결론 참고).
+
+### 5-2. 추가한 쿼리 — 단순 WHERE 필터, JOIN
+
+기존에 못 해봤던 두 가지를 새로 추가했다: 비-PK 컬럼 단순 필터(`device_id = ?`, 결과 196행)와
+JOIN(`iot_events`(900만) x `device_dim`(신규 생성, 5만행 차원 테이블) → 지역별 집계).
+
+### 5-3. 결과 — Trino 경유
+
+| 쿼리 | ignite | postgresql |
+|---|---|---|
+| `COUNT(*)` | 1.72s | 1.85s |
+| PK 조회 | 1.51s | 2.01s |
+| **단순 필터** (`device_id = ?`, 비-PK) | 8.74s | **1.89s** |
+| `GROUP BY device_id` | 6.37s | **3.52s** |
+| **JOIN** (`iot_events` x `device_dim`) | 18.75s | **11.29s** |
+
+### 5-4. 결과 — 엔진 직접 질의 (Trino 미경유)
+
+| 쿼리 | ignite | postgresql |
+|---|---|---|
+| `COUNT(*)` | 0.94s | **0.48s** |
+| PK 조회 | 0.87s | **0.53s** |
+| **단순 필터** (`device_id = ?`) | 4.58s | **0.50s** |
+| `GROUP BY device_id` | 5.91s | **1.07s** |
+| **JOIN** | 17.27s | **1.46s** |
+
+### 5-5. 결론 — 판도가 완전히 바뀌었다
+
+**PostgreSQL 튜닝 효과가 압도적이다.** 직접 질의 기준으로 COUNT(*)/PK조회/GROUP BY가 튜닝 전
+대비 전부 약 4배씩 빨라졌고(예: GROUP BY 4.32s→1.07s), 이제 **거의 모든 쿼리에서 PostgreSQL이
+Ignite를 앞선다** — 특히 JOIN은 17.27s vs 1.46s로 12배, 단순 필터는 4.58s vs 0.50s로 9배 차이가
+났다. `shared_buffers`가 128MB→4GB로 늘면서 1.1GB 테이블 전체가 드디어 메모리에 다 올라갔고,
+`work_mem` 256MB로 해시 집계 스필이 없어졌고, 병렬 워커도 CPU 4코어를 실제로 쓸 수 있게 된
+효과가 그대로 드러난 것으로 보인다.
+
+**반대로 Ignite는 메모리를 줄인 영향(30Gi/6g힙 → 16Gi/4g힙)으로 일부 쿼리가 오히려 느려졌다** —
+같은 parallelism=4인데도 단순 필터가 이전엔 테스트 안 했지만 이번엔 4.58s로 꽤 느리게 나왔다.
+9백만 행 + 인덱스 구조를 다루기엔 10GB off-heap이 빠듯했을 가능성이 있다.
+
+**새로 발견한 두 가지 구조적 사실:**
+
+1. **Trino는 JOIN을 커넥터로 내려보내지 않는다.** `EXPLAIN`으로 확인해보니 COUNT(*)/GROUP BY와
+   달리 JOIN은 Trino 자신의 분산 조인 엔진(`InnerJoin`, `PARTITIONED` distribution)이 처리하고,
+   각 테이블은 그냥 단순 스캔만 커넥터로 내려간다. 그래서 JOIN에서 "Trino 경유"와 "직접"의 차이가
+   다른 쿼리보다 훨씬 크게 벌어진다(PostgreSQL: 11.29s→1.46s, 거의 8배) — 이 격차는 Trino/JDBC
+   왕복 비용이 아니라 **Trino 자체의 조인 실행 비용**이다.
+2. **Ignite는 `query_parallelism`이 다른 테이블끼리 네이티브 JOIN이 안 된다.** `device_dim`을
+   기본값(parallelism=1)으로 만들고 `iot_events`(parallelism=4)와 직접 JOIN을 시도하니
+   `Using indexes with different parallelism levels in same query is forbidden` 에러가 났다.
+   `device_dim`도 parallelism=4로 다시 만들고 나서야 됐다 — **앞으로 서로 JOIN할 테이블들은
+   parallelism을 반드시 통일해야 한다**는 실무 제약사항.
+
+**교훈**: 이전 장(4장)까지의 "Ignite가 COUNT(*)/PK조회에서 우세하다"는 결론은 **리소스가 불공정하게
+배분된 상태에서 나온 결과였다.** 리소스를 맞추고 나니 그 우위 상당수가 사라지거나 역전됐다 —
+엔진 비교는 반드시 동일한 리소스 조건에서 해야 한다는 걸 스스로 증명한 셈이다.
+
+---
+
+## 6. 재현 방법
 
 전체 재현 절차는 `docs/airgap-full-test-runbook.md` 참고.

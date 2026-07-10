@@ -78,13 +78,45 @@ Trino의 Redis 커넥터는 서버사이드 필터링이 없다 — Redis 서버
 4. **parallelism=4로 재생성 + 재적재 후 재측정** — 12.62s → 5.89s, **약 2.1배 개선.**
    완벽한 4배가 아닌 건 병합/조율 오버헤드 때문에 자연스러운 현상.
 5. parallelism 튜닝 후에도 PostgreSQL이 근소하게 더 빠름(직접 질의 기준 4.32s vs 4.84s) —
-   PostgreSQL 쪽도 리소스 limit이 테이블 크기(1.1GB)보다 작다는 별개의 병목이 있어서로 보임
-   (4장 튜닝 로드맵 참고).
+   PostgreSQL 쪽도 리소스 limit이 테이블 크기(1.1GB)보다 작다는 별개의 병목이 있어서로 보임.
 
 **교훈**: "왜 느린지" 판단할 때 (1) Trino pushdown 여부를 `EXPLAIN`으로 먼저 확인하고,
 (2) 의심 가는 엔진에 직접 붙어서 같은 쿼리를 재보고, (3) 그 엔진의 실제 설정(카탈로그/캐시
 메타데이터)을 확인하는 순서로 좁혀나가는 게 효과적이었다. 추측만으로 결론 내리지 않고
 매 단계 실측으로 확인.
+
+### 2-5. 리소스를 맞추고 PostgreSQL을 튜닝하니 판도가 뒤집혔다
+
+2-4의 결론(parallelism 튜닝 후에도 Ignite가 COUNT(*)/PK조회는 우세)은 사실 **두 파드의 리소스가
+불공정하게 배분된 상태**(Ignite: cpu limit 4/memory 30Gi, PostgreSQL: cpu limit 1/memory 1Gi)
+에서 나온 결과였다. 두 파드를 동일 스펙(cpu limit 4/memory 16Gi)으로 맞추고, PostgreSQL의
+`shared_buffers`(128MB→4GB)/`work_mem`(4MB→256MB)/병렬 워커 설정도 그 메모리를 실제로 쓰도록
+같이 올린 뒤 재측정하니:
+
+- PostgreSQL 직접 질의가 튜닝 전 대비 전 쿼리에서 약 4배씩 빨라짐(GROUP BY 4.32s→1.07s 등)
+- **이제 거의 모든 쿼리에서 PostgreSQL이 Ignite를 앞선다** — 특히 JOIN은 12배(17.27s vs 1.46s)
+- 반대로 Ignite는 메모리 limit을 30Gi→16Gi로 줄인 영향(힙 6g→4g, off-heap 23GB→10GB)으로
+  일부 쿼리(단순 필터 등)가 오히려 느려짐
+
+자세한 수치는 `docs/test-results-summary.md` 5장. **교훈**: 엔진 간 성능 비교는 반드시 동일한
+리소스 조건에서 해야 하며, 그렇지 않으면 "어느 엔진이 빠르다"는 결론이 실은 "어느 쪽에 리소스를
+더 줬는지"를 측정한 것에 불과할 수 있다.
+
+### 2-6. Trino는 JOIN을 커넥터로 내려보내지 않는다
+
+COUNT(*)/GROUP BY는 `EXPLAIN`으로 보면 소스 엔진 쿼리 문자열에 통째로 pushdown되지만, **JOIN은
+다르다** — Trino 자신의 분산 조인 엔진(`InnerJoin`, `PARTITIONED` distribution)이 처리하고, 각
+테이블은 단순 스캔만 커넥터로 내려간다. 그래서 JOIN에서는 "Trino 경유"와 "엔진 직접 질의"의
+차이가 다른 쿼리보다 훨씬 크게 벌어진다 (PostgreSQL 기준 11.29s→1.46s, 거의 8배) — 이건 평소의
+Trino/JDBC 왕복 고정비용이 아니라 **Trino 자체의 조인 실행 비용**이다. 여러 테이블을 자주
+JOIN해서 쓸 계획이면, Trino의 조인 성능이 병목이 될 수 있다는 걸 감안해야 한다.
+
+### 2-7. Ignite는 `query_parallelism`이 다른 테이블끼리 네이티브 JOIN이 안 된다
+
+`query_parallelism=1`(기본값)로 만든 테이블과 `query_parallelism=4`로 만든 테이블을 직접 JOIN하면
+`Using indexes with different parallelism levels in same query is forbidden` 에러가 난다.
+**앞으로 서로 JOIN할 가능성이 있는 테이블들은 반드시 같은 parallelism으로 통일해서 만들어야
+한다** — 튜닝한답시고 테이블마다 다른 값을 주면 나중에 JOIN이 아예 안 되는 걸 뒤늦게 발견하게 됨.
 
 ---
 
@@ -143,32 +175,35 @@ SPOF.
 
 | 항목 | 현재 상태 | 개선 방향 |
 |---|---|---|
-| ★ `query_parallelism` | 4로 상향, 2.1배 개선 확인 | CPU limit을 늘리면 그만큼 더 올릴 여지 있음 — 반드시 cgroup 기준 실제 할당량으로 맞출 것(`nproc`는 host 값이라 오해 소지) |
+| ★ `query_parallelism` | 4로 상향, 2.1배 개선 확인 | CPU limit을 늘리면 그만큼 더 올릴 여지 있음 — 반드시 cgroup 기준 실제 할당량으로 맞출 것(`nproc`는 host 값이라 오해 소지). JOIN할 테이블들은 반드시 같은 값으로 통일할 것(2-7 참고) |
+| ★ 메모리 축소 영향 확인 | limit 30Gi→16Gi(힙 6g→4g, off-heap 23GB→10GB)로 줄이니 단순 필터 등 일부 쿼리가 오히려 느려짐 | 16Gi가 이 데이터량(9M행)엔 빠듯한 것으로 보임 — off-heap을 다시 늘리거나(가능하면), 데이터량 대비 적정선을 다시 찾아볼 것 |
 | 노드 수 | 1개 (single replica) | 여러 노드로 늘리면 파티션이 노드 간에도 분산돼 `query_parallelism`과 별개로 추가 병렬화 가능 — 아직 안 써본 레버 |
 | WAL 모드 | `LOG_ONLY` | `FSYNC`(더 안전, 더 느림)와의 트레이드오프 재검토, 체크포인트 주기(`checkpointFreq`, 현재 180000ms)도 튜닝 대상 |
 | 보조 인덱스 | 없음 (PK만) | 자주 필터링하는 컬럼에 인덱스 추가 시 비-PK 필터 쿼리 개선 여지 — 아직 테스트 안 함 |
+| JOIN 성능 | 직접 질의도 17초대로 느림 | Trino 오버헤드가 아니라 Ignite 자체의 조인 실행이 느린 것으로 확인됨(2-6, 2-7 참고) — 조인이 잦은 워크로드면 조인 키를 affinity key로 맞춰서(collocated join) 셔플을 줄이는 것부터 검토 |
 
 ### PostgreSQL
 
 | 항목 | 현재 상태 | 개선 방향 |
 |---|---|---|
-| Pod 리소스 limit | cpu 1, memory 1Gi | **테이블 자체(1.1GB)가 이미 메모리 limit보다 큼** — Ignite와 같은 "설정이 데이터 규모를 못 따라간" 패턴. 가장 먼저 늘려볼 항목 |
-| `shared_buffers` | 128MB (기본값) | 리소스 limit 상향과 같이 올릴 것 — 지금은 테이블 전체를 캐시에 못 올림 |
-| `work_mem` | 4MB (기본값) | 카디널리티 5만짜리 GROUP BY 해시 집계가 이 크기에 걸릴 듯 말 듯함 — `SET work_mem='64MB'`로 재테스트 권장 (아직 안 해봄) |
-| `max_parallel_workers_per_gather` | 2 (기본값) | CPU limit이 1이라 병렬 워커 띄울 여유가 사실상 없음 — 리소스 limit과 같이 가야 의미 있음 |
-| 인덱스 | 없음 | Ignite와 마찬가지로 아직 안 걸어봄 |
+| ★ Pod 리소스 limit | cpu 1→4, memory 1Gi→16Gi로 상향, Ignite와 동일 스펙 | 직접 질의 기준 전 쿼리 약 4배 개선 확인 |
+| ★ `shared_buffers` | 128MB→4GB | 1.1GB 테이블이 이제 캐시에 다 올라감 — 데이터가 더 커지면 이 비율(약 25%) 유지하며 같이 올릴 것 |
+| ★ `work_mem` | 4MB→256MB | GROUP BY 해시 집계 스필 해소로 추정, 큰 개선 확인 |
+| ★ `max_parallel_workers_per_gather` | 2→4 | CPU limit 상향과 같이 적용, 개선에 기여 |
+| 인덱스 | 없음 | 지금도 이미 빠르지만, 비-PK 필터/JOIN 키에 인덱스 추가 시 추가 개선 여지 — 아직 테스트 안 함 |
+| JOIN 성능 | 직접 질의 1.46s로 이미 매우 빠름 | 인덱스 추가하면 더 개선될 수 있음 — 우선순위는 낮음(이미 Ignite 대비 12배 빠름) |
 
 ### Trino
 
 | 항목 | 현재 상태 | 개선 방향 |
 |---|---|---|
-| Worker | 0대 (coordinator 단독) | 오늘 측정한 쿼리는 전부 소스 엔진에 pushdown돼서 worker 유무가 무관했음 — worker 증설은 여러 소스 JOIN이나 pushdown 안 되는 연산에서나 효과. 지금 결과만으로 "worker부터 늘리자"고 판단하면 안 됨 |
+| Worker | 0대 (coordinator 단독) | COUNT(*)/GROUP BY는 소스 엔진에 pushdown돼서 worker 유무가 무관했지만, **JOIN은 Trino 자신의 엔진이 처리**하는 걸 확인함(2-6) — JOIN이 잦은 워크로드라면 worker 증설이 실제로 효과 있을 가능성이 높음. 이전엔 "worker부터 늘리지 말자"고 했는데, JOIN 결과를 보면 재검토할 만함 |
 | 측정 방식의 고정 오버헤드 | 매 쿼리 1.3~2초 (`kubectl exec` + CLI 새 JVM 기동) | 실제 서비스는 상시 연결 클라이언트를 쓰므로 이 비용은 대부분 사라짐 — 다음 벤치마크는 상시 연결(JDBC 커넥션 재사용) 기반으로 재는 게 더 정확 |
 
 ### 다음 세션 후보 (아직 검증 안 된 것)
 
-- PostgreSQL `work_mem` 상향 후 GROUP BY 재측정
-- PostgreSQL/Ignite 리소스 limit을 데이터 크기에 맞게 올린 뒤 전체 쿼리셋 재측정
-- Ignite 멀티 노드(2~3 replica)로 늘려서 노드 간 파티션 분산 효과 실측
-- 비-PK 필터 컬럼에 인덱스 걸고 필터 쿼리 재측정
+- Ignite off-heap을 16Gi 한도 내에서 다시 조정(예: heap 3g/off-heap 11GB)해서 단순 필터 성능 회복되는지 확인
+- Trino worker를 실제로 늘려서 JOIN 쿼리가 얼마나 개선되는지 실측 (지금까지 worker 0대로만 테스트함)
+- PostgreSQL/Ignite 둘 다 비-PK 필터·JOIN 키에 인덱스 걸고 재측정
+- Ignite 멀티 노드(2~3 replica)로 늘려서 노드 간 파티션 분산 효과 실측 (JOIN 성능 포함)
 - 상시 연결 클라이언트로 고정 오버헤드 없이 재측정
