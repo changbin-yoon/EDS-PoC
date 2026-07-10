@@ -14,6 +14,7 @@ data:
     coordinator=true
     node-scheduler.include-coordinator=true
     http-server.http.port=8080
+    http-server.process-forwarded=true
     query.max-memory=1GB
     query.max-memory-per-node=512MB
     discovery.uri=http://trino-coordinator.trino.svc.cluster.local:8080
