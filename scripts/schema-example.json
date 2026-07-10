@@ -1,0 +1,16 @@
+{
+  "table": "iot_events",
+  "primary_key": "event_id",
+  "columns": [
+    { "name": "event_id",       "type": "bigint",  "gen": "sequence",  "start": 1 },
+    { "name": "device_id",      "type": "bigint",  "gen": "random_int", "min": 1, "max": 50000 },
+    { "name": "event_type",     "type": "varchar", "gen": "choice",    "values": ["TEMP", "HUMIDITY", "PRESSURE", "VIBRATION", "BATTERY"] },
+    { "name": "value",          "type": "double",  "gen": "random_float", "min": 0, "max": 1000, "decimals": 2 },
+    { "name": "unit",           "type": "varchar", "gen": "choice",    "values": ["C", "PCT", "HPA", "MM_S", "V"] },
+    { "name": "event_date",     "type": "varchar", "gen": "random_date", "start": "2026-01-01", "end": "2026-12-31" },
+    { "name": "event_datetime", "type": "varchar", "gen": "random_datetime", "start": "2026-01-01", "end": "2026-12-31" },
+    { "name": "site_code",      "type": "varchar", "gen": "choice",    "values": ["A1", "B2", "C3", "D4"], "null_rate": 0.05 },
+    { "name": "quality_flag",   "type": "bigint",  "gen": "random_int", "min": 0, "max": 3, "null_rate": 0.2 },
+    { "name": "raw_tag",        "type": "varchar", "gen": "random_string", "length": 12 }
+  ]
+}

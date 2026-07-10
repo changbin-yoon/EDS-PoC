@@ -3,6 +3,11 @@
 > 이 문서만 보고 외부 도움 없이 처음부터 끝까지 재현할 수 있도록 작성했다.
 > 실제로 이 저장소 내용을 가지고 한 번 전체 재현해서 검증한 절차 그대로다.
 > 명령어는 전부 리포지토리 루트(`EDS-PoC/`)에서 실행하는 것을 기준으로 한다.
+>
+> **Redis 관련 주의**: 배포(1장)와 백업(6장)에는 여전히 Redis가 포함돼 있지만, **성능
+> 테스트/대량 적재 스크립트(4장, 9장)에서는 Redis를 의도적으로 제외**했다. 이유는
+> `docs/redis-exclusion-rationale.md` 참고 — 요약하면 Trino의 Redis 커넥터는 서버사이드
+> 필터링이 없어 모든 쿼리가 풀스캔이 되고, 실측으로도 항상 가장 느렸다.
 
 ---
 
@@ -332,10 +337,44 @@ kubectl exec -n ignite ignite-cluster-0 -- /opt/ignite/apache-ignite/bin/control
 | Ignite persistence를 처음 켰는데 쿼리가 안 됨 (`state=INACTIVE`) | persistence를 새로 켠 시점엔 baseline이 없어 자동 활성화가 안 됨 | `control.sh --activate` 1회 수동 실행 (이후 재기동부터는 자동) |
 | `kubectl apply -f ignite.yaml`은 성공했다는데 재기동하면 다른 설정으로 뜸 | StatefulSet의 `serviceName`이 실제 배포본과 어긋나 있으면 `kubectl apply`가 StatefulSet 부분만 조용히 Forbidden 처리 — ConfigMap만 바뀌고 Pod는 옛 프로세스로 계속 떠 있다가, 다음 재기동 때가 돼서야 새 설정을 읽고 터짐 | `kubectl get statefulset ... -o yaml`로 실제 `serviceName`이 파일과 일치하는지 항상 먼저 확인 |
 | Trino에서 Ignite/Redis/PostgreSQL 쿼리가 전부 406 에러 | nginx-ingress가 `X-Forwarded-For` 헤더를 항상 붙이는데 Trino가 forwarded 헤더를 거부하도록 기본 설정돼 있음 | `config.properties`에 `http-server.process-forwarded=true` 추가 (이 저장소는 이미 반영됨) |
+| `kubectl cp`/`psql \copy` 실행 시 `Cannot open: Read-only file system` | CNPG postgres 컨테이너는 `/tmp`가 읽기전용(보안 하드닝) | `/controller` 또는 `/var/lib/postgresql/data` 하위처럼 쓰기 가능한 경로 사용 (`bulk-load-postgresql.sh`는 이미 `/controller` 사용) |
+| `sqlline.sh` 실행이 `Enter username for jdbc:ignite:thin://...`에서 멈춤(EOF 에러) | 비대화형(exec) 환경에서 자격증명 프롬프트가 뜨는데 입력을 못 받음 | `--connectInteractionMode=notAskCredentials`와 `-n`/`-p`(auth 비활성화 상태면 아무 값이나) 옵션 추가 (`bulk-load-ignite.sh`는 이미 반영) |
+| 900만 행 넣었더니 Ignite PVC가 부족할까 걱정됨 | 소규모(수천 행) 테이블에서 본 바이트/행 수치(파티션 오버헤드 지배적)를 그대로 곱하면 과대추정됨 | 단일 테이블에 대량으로 넣을 땐 파티션당 행 수가 늘어나 바이트/행이 오히려 줄어듦 — `docs/large-scale-synthetic-test.md` 3장 실측 참고, 그래도 여유 있게 PVC는 미리 늘려둘 것 |
 
 ---
 
-## 9. 결과 정리 방법
+## 9. 대용량(수백만 건) 합성 데이터 테스트
+
+OMOP 샘플 CSV가 아니라 **직접 정의한 컬럼/타입으로 임의 데이터를 대량 생성**해서 테스트하고
+싶을 때 쓰는 절차. 자세한 배경과 실측 결과는 `docs/large-scale-synthetic-test.md` 참고.
+
+```bash
+# 1) 스키마 정의 (scripts/schema-example.json을 복사해서 컬럼 구성 변경)
+cp scripts/schema-example.json /tmp/my-schema.json
+# ... 컬럼/타입/생성규칙 편집 (파일 상단 docstring에 gen 전략 설명 있음) ...
+
+# 2) 데이터 생성 (표준 라이브러리만 사용 — airgap에서 pip install 불필요)
+python3 scripts/generate-synthetic-data.py \
+  --schema /tmp/my-schema.json --rows 9000000 --out /tmp/synthetic.csv --seed 42
+
+# 3) PVC 용량 확인/증설 (대량 데이터 전에 미리)
+kubectl patch cluster eds-pg -n cnpg --type merge -p '{"spec":{"storage":{"size":"20Gi"}}}'
+kubectl patch pvc work-ignite-cluster-0 -n ignite -p '{"spec":{"resources":{"requests":{"storage":"30Gi"}}}}'
+
+# 4) 네이티브 벌크로드 (Trino INSERT가 아니라 psql \copy / Ignite COPY 사용 — 훨씬 빠름)
+./scripts/bulk-load-postgresql.sh /tmp/synthetic.csv
+./scripts/bulk-load-ignite.sh /tmp/synthetic.csv
+
+# 5) 성능 테스트 (테이블명, PK 컬럼, GROUP BY용 컬럼을 스키마에 맞게 지정)
+./scripts/perf-test.sh iot_events event_id device_id
+```
+
+이 클러스터에서 900만 행 기준 실측: PostgreSQL COPY ~30초(~300,000행/초), Ignite COPY 106초
+(~84,000행/초) — 하루 900만 건(평균 초당 104건) 목표치 대비 압도적으로 여유로웠다.
+
+---
+
+## 10. 결과 정리 방법
 
 성능 지표를 뽑았으면 `docs/trino-three-engines-ops-review.md`의 2장 표 형식을 그대로 참고해서
 자신의 환경 결과로 갱신하면 된다. 절대 수치는 환경(노드 스펙, 네트워크)마다 다르게 나올 수

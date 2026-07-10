@@ -311,4 +311,4 @@ spec:
         storageClassName: csi-cinder-sc-retain
         resources:
           requests:
-            storage: 10Gi
+            storage: 30Gi
