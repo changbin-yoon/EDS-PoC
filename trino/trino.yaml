@@ -188,6 +188,811 @@ data:
         ]
       }
     }
+
+
+  care_site.json: |
+    {
+      "tableName": "care_site",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "care_site_id",
+            "type": "bigint",
+            "mapping": "care_site_id"
+          },
+          {
+            "name": "care_site_name",
+            "type": "varchar",
+            "mapping": "care_site_name"
+          },
+          {
+            "name": "place_of_service_concept_id",
+            "type": "varchar",
+            "mapping": "place_of_service_concept_id"
+          },
+          {
+            "name": "location_id",
+            "type": "varchar",
+            "mapping": "location_id"
+          },
+          {
+            "name": "care_site_source_value",
+            "type": "bigint",
+            "mapping": "care_site_source_value"
+          },
+          {
+            "name": "place_of_service_source_value",
+            "type": "varchar",
+            "mapping": "place_of_service_source_value"
+          }
+        ]
+      }
+    }
+
+  person.json: |
+    {
+      "tableName": "person",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "person_id",
+            "type": "bigint",
+            "mapping": "person_id"
+          },
+          {
+            "name": "gender_concept_id",
+            "type": "bigint",
+            "mapping": "gender_concept_id"
+          },
+          {
+            "name": "year_of_birth",
+            "type": "bigint",
+            "mapping": "year_of_birth"
+          },
+          {
+            "name": "month_of_birth",
+            "type": "varchar",
+            "mapping": "month_of_birth"
+          },
+          {
+            "name": "day_of_birth",
+            "type": "varchar",
+            "mapping": "day_of_birth"
+          },
+          {
+            "name": "birth_datetime",
+            "type": "varchar",
+            "mapping": "birth_datetime"
+          },
+          {
+            "name": "race_concept_id",
+            "type": "bigint",
+            "mapping": "race_concept_id"
+          },
+          {
+            "name": "ethnicity_concept_id",
+            "type": "bigint",
+            "mapping": "ethnicity_concept_id"
+          },
+          {
+            "name": "location_id",
+            "type": "varchar",
+            "mapping": "location_id"
+          },
+          {
+            "name": "provider_id",
+            "type": "varchar",
+            "mapping": "provider_id"
+          },
+          {
+            "name": "care_site_id",
+            "type": "varchar",
+            "mapping": "care_site_id"
+          },
+          {
+            "name": "person_source_value",
+            "type": "bigint",
+            "mapping": "person_source_value"
+          },
+          {
+            "name": "gender_source_concept_id",
+            "type": "bigint",
+            "mapping": "gender_source_concept_id"
+          },
+          {
+            "name": "gender_source_value",
+            "type": "bigint",
+            "mapping": "gender_source_value"
+          },
+          {
+            "name": "race_source_value",
+            "type": "varchar",
+            "mapping": "race_source_value"
+          },
+          {
+            "name": "race_source_concept_id",
+            "type": "bigint",
+            "mapping": "race_source_concept_id"
+          },
+          {
+            "name": "ethnicity_source_value",
+            "type": "varchar",
+            "mapping": "ethnicity_source_value"
+          },
+          {
+            "name": "ethnicity_source_concept_id",
+            "type": "bigint",
+            "mapping": "ethnicity_source_concept_id"
+          }
+        ]
+      }
+    }
+
+  payer_plan_period.json: |
+    {
+      "tableName": "payer_plan_period",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "payer_plan_period_id",
+            "type": "bigint",
+            "mapping": "payer_plan_period_id"
+          },
+          {
+            "name": "person_id",
+            "type": "bigint",
+            "mapping": "person_id"
+          },
+          {
+            "name": "payer_plan_period_start_date",
+            "type": "varchar",
+            "mapping": "payer_plan_period_start_date"
+          },
+          {
+            "name": "payer_plan_period_end_date",
+            "type": "varchar",
+            "mapping": "payer_plan_period_end_date"
+          },
+          {
+            "name": "payer_concept_id",
+            "type": "bigint",
+            "mapping": "payer_concept_id"
+          },
+          {
+            "name": "payer_source_value",
+            "type": "bigint",
+            "mapping": "payer_source_value"
+          },
+          {
+            "name": "payer_source_concept_id",
+            "type": "bigint",
+            "mapping": "payer_source_concept_id"
+          },
+          {
+            "name": "plan_concept_id",
+            "type": "bigint",
+            "mapping": "plan_concept_id"
+          },
+          {
+            "name": "plan_source_value",
+            "type": "varchar",
+            "mapping": "plan_source_value"
+          },
+          {
+            "name": "plan_source_concept_id",
+            "type": "bigint",
+            "mapping": "plan_source_concept_id"
+          },
+          {
+            "name": "sponsor_concept_id",
+            "type": "bigint",
+            "mapping": "sponsor_concept_id"
+          },
+          {
+            "name": "sponsor_source_value",
+            "type": "varchar",
+            "mapping": "sponsor_source_value"
+          },
+          {
+            "name": "sponsor_source_concept_id",
+            "type": "bigint",
+            "mapping": "sponsor_source_concept_id"
+          },
+          {
+            "name": "family_source_value",
+            "type": "varchar",
+            "mapping": "family_source_value"
+          },
+          {
+            "name": "stop_reason_concept_id",
+            "type": "bigint",
+            "mapping": "stop_reason_concept_id"
+          },
+          {
+            "name": "stop_reason_source_value",
+            "type": "varchar",
+            "mapping": "stop_reason_source_value"
+          },
+          {
+            "name": "stop_reason_source_concept_id",
+            "type": "bigint",
+            "mapping": "stop_reason_source_concept_id"
+          }
+        ]
+      }
+    }
+
+  condition_era.json: |
+    {
+      "tableName": "condition_era",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "condition_era_id",
+            "type": "bigint",
+            "mapping": "condition_era_id"
+          },
+          {
+            "name": "person_id",
+            "type": "bigint",
+            "mapping": "person_id"
+          },
+          {
+            "name": "condition_concept_id",
+            "type": "bigint",
+            "mapping": "condition_concept_id"
+          },
+          {
+            "name": "condition_era_start_date",
+            "type": "varchar",
+            "mapping": "condition_era_start_date"
+          },
+          {
+            "name": "condition_era_end_date",
+            "type": "varchar",
+            "mapping": "condition_era_end_date"
+          },
+          {
+            "name": "condition_occurrence_count",
+            "type": "bigint",
+            "mapping": "condition_occurrence_count"
+          }
+        ]
+      }
+    }
+
+  condition_occurrence.json: |
+    {
+      "tableName": "condition_occurrence",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "condition_occurrence_id",
+            "type": "bigint",
+            "mapping": "condition_occurrence_id"
+          },
+          {
+            "name": "person_id",
+            "type": "bigint",
+            "mapping": "person_id"
+          },
+          {
+            "name": "condition_concept_id",
+            "type": "bigint",
+            "mapping": "condition_concept_id"
+          },
+          {
+            "name": "condition_start_date",
+            "type": "varchar",
+            "mapping": "condition_start_date"
+          },
+          {
+            "name": "condition_start_datetime",
+            "type": "varchar",
+            "mapping": "condition_start_datetime"
+          },
+          {
+            "name": "condition_end_date",
+            "type": "varchar",
+            "mapping": "condition_end_date"
+          },
+          {
+            "name": "condition_end_datetime",
+            "type": "varchar",
+            "mapping": "condition_end_datetime"
+          },
+          {
+            "name": "condition_type_concept_id",
+            "type": "bigint",
+            "mapping": "condition_type_concept_id"
+          },
+          {
+            "name": "stop_reason",
+            "type": "varchar",
+            "mapping": "stop_reason"
+          },
+          {
+            "name": "provider_id",
+            "type": "varchar",
+            "mapping": "provider_id"
+          },
+          {
+            "name": "visit_occurrence_id",
+            "type": "bigint",
+            "mapping": "visit_occurrence_id"
+          },
+          {
+            "name": "visit_detail_id",
+            "type": "bigint",
+            "mapping": "visit_detail_id"
+          },
+          {
+            "name": "condition_source_value",
+            "type": "varchar",
+            "mapping": "condition_source_value"
+          },
+          {
+            "name": "condition_source_concept_id",
+            "type": "bigint",
+            "mapping": "condition_source_concept_id"
+          },
+          {
+            "name": "condition_status_source_value",
+            "type": "varchar",
+            "mapping": "condition_status_source_value"
+          },
+          {
+            "name": "condition_status_concept_id",
+            "type": "bigint",
+            "mapping": "condition_status_concept_id"
+          }
+        ]
+      }
+    }
+
+  observation_period.json: |
+    {
+      "tableName": "observation_period",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "observation_period_id",
+            "type": "bigint",
+            "mapping": "observation_period_id"
+          },
+          {
+            "name": "person_id",
+            "type": "bigint",
+            "mapping": "person_id"
+          },
+          {
+            "name": "observation_period_start_date",
+            "type": "varchar",
+            "mapping": "observation_period_start_date"
+          },
+          {
+            "name": "observation_period_end_date",
+            "type": "varchar",
+            "mapping": "observation_period_end_date"
+          },
+          {
+            "name": "period_type_concept_id",
+            "type": "bigint",
+            "mapping": "period_type_concept_id"
+          }
+        ]
+      }
+    }
+
+  visit_occurrence.json: |
+    {
+      "tableName": "visit_occurrence",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "visit_occurrence_id",
+            "type": "bigint",
+            "mapping": "visit_occurrence_id"
+          },
+          {
+            "name": "person_id",
+            "type": "bigint",
+            "mapping": "person_id"
+          },
+          {
+            "name": "visit_concept_id",
+            "type": "bigint",
+            "mapping": "visit_concept_id"
+          },
+          {
+            "name": "visit_start_date",
+            "type": "varchar",
+            "mapping": "visit_start_date"
+          },
+          {
+            "name": "visit_start_datetime",
+            "type": "varchar",
+            "mapping": "visit_start_datetime"
+          },
+          {
+            "name": "visit_end_date",
+            "type": "varchar",
+            "mapping": "visit_end_date"
+          },
+          {
+            "name": "visit_end_datetime",
+            "type": "varchar",
+            "mapping": "visit_end_datetime"
+          },
+          {
+            "name": "visit_type_concept_id",
+            "type": "bigint",
+            "mapping": "visit_type_concept_id"
+          },
+          {
+            "name": "provider_id",
+            "type": "varchar",
+            "mapping": "provider_id"
+          },
+          {
+            "name": "care_site_id",
+            "type": "varchar",
+            "mapping": "care_site_id"
+          },
+          {
+            "name": "visit_source_value",
+            "type": "varchar",
+            "mapping": "visit_source_value"
+          },
+          {
+            "name": "visit_source_concept_id",
+            "type": "bigint",
+            "mapping": "visit_source_concept_id"
+          },
+          {
+            "name": "admitting_source_concept_id",
+            "type": "bigint",
+            "mapping": "admitting_source_concept_id"
+          },
+          {
+            "name": "admitting_source_value",
+            "type": "varchar",
+            "mapping": "admitting_source_value"
+          },
+          {
+            "name": "discharge_to_concept_id",
+            "type": "bigint",
+            "mapping": "discharge_to_concept_id"
+          },
+          {
+            "name": "discharge_to_source_value",
+            "type": "varchar",
+            "mapping": "discharge_to_source_value"
+          },
+          {
+            "name": "preceding_visit_occurrence_id",
+            "type": "varchar",
+            "mapping": "preceding_visit_occurrence_id"
+          },
+          {
+            "name": "source_record_id",
+            "type": "bigint",
+            "mapping": "source_record_id"
+          }
+        ]
+      }
+    }
+
+  measurement.json: |
+    {
+      "tableName": "measurement",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "measurement_id",
+            "type": "bigint",
+            "mapping": "measurement_id"
+          },
+          {
+            "name": "person_id",
+            "type": "bigint",
+            "mapping": "person_id"
+          },
+          {
+            "name": "measurement_concept_id",
+            "type": "bigint",
+            "mapping": "measurement_concept_id"
+          },
+          {
+            "name": "measurement_date",
+            "type": "varchar",
+            "mapping": "measurement_date"
+          },
+          {
+            "name": "measurement_datetime",
+            "type": "varchar",
+            "mapping": "measurement_datetime"
+          },
+          {
+            "name": "measurement_type_concept_id",
+            "type": "bigint",
+            "mapping": "measurement_type_concept_id"
+          },
+          {
+            "name": "operator_concept_id",
+            "type": "bigint",
+            "mapping": "operator_concept_id"
+          },
+          {
+            "name": "value_as_number",
+            "type": "double",
+            "mapping": "value_as_number"
+          },
+          {
+            "name": "value_as_concept_id",
+            "type": "bigint",
+            "mapping": "value_as_concept_id"
+          },
+          {
+            "name": "unit_concept_id",
+            "type": "bigint",
+            "mapping": "unit_concept_id"
+          },
+          {
+            "name": "range_low",
+            "type": "varchar",
+            "mapping": "range_low"
+          },
+          {
+            "name": "range_high",
+            "type": "double",
+            "mapping": "range_high"
+          },
+          {
+            "name": "provider_id",
+            "type": "varchar",
+            "mapping": "provider_id"
+          },
+          {
+            "name": "visit_occurrence_id",
+            "type": "bigint",
+            "mapping": "visit_occurrence_id"
+          },
+          {
+            "name": "visit_detail_id",
+            "type": "bigint",
+            "mapping": "visit_detail_id"
+          },
+          {
+            "name": "measurement_source_value",
+            "type": "varchar",
+            "mapping": "measurement_source_value"
+          },
+          {
+            "name": "measurement_source_concept_id",
+            "type": "bigint",
+            "mapping": "measurement_source_concept_id"
+          },
+          {
+            "name": "unit_source_value",
+            "type": "varchar",
+            "mapping": "unit_source_value"
+          },
+          {
+            "name": "value_source_value",
+            "type": "varchar",
+            "mapping": "value_source_value"
+          }
+        ]
+      }
+    }
+
+  observation.json: |
+    {
+      "tableName": "observation",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "observation_id",
+            "type": "bigint",
+            "mapping": "observation_id"
+          },
+          {
+            "name": "person_id",
+            "type": "bigint",
+            "mapping": "person_id"
+          },
+          {
+            "name": "observation_concept_id",
+            "type": "bigint",
+            "mapping": "observation_concept_id"
+          },
+          {
+            "name": "observation_date",
+            "type": "varchar",
+            "mapping": "observation_date"
+          },
+          {
+            "name": "observation_datetime",
+            "type": "varchar",
+            "mapping": "observation_datetime"
+          },
+          {
+            "name": "observation_type_concept_id",
+            "type": "bigint",
+            "mapping": "observation_type_concept_id"
+          },
+          {
+            "name": "value_as_number",
+            "type": "double",
+            "mapping": "value_as_number"
+          },
+          {
+            "name": "value_as_string",
+            "type": "varchar",
+            "mapping": "value_as_string"
+          },
+          {
+            "name": "value_as_concept_id",
+            "type": "bigint",
+            "mapping": "value_as_concept_id"
+          },
+          {
+            "name": "qualifier_concept_id",
+            "type": "bigint",
+            "mapping": "qualifier_concept_id"
+          },
+          {
+            "name": "unit_concept_id",
+            "type": "bigint",
+            "mapping": "unit_concept_id"
+          },
+          {
+            "name": "provider_id",
+            "type": "varchar",
+            "mapping": "provider_id"
+          },
+          {
+            "name": "visit_occurrence_id",
+            "type": "bigint",
+            "mapping": "visit_occurrence_id"
+          },
+          {
+            "name": "visit_detail_id",
+            "type": "bigint",
+            "mapping": "visit_detail_id"
+          },
+          {
+            "name": "observation_source_value",
+            "type": "varchar",
+            "mapping": "observation_source_value"
+          },
+          {
+            "name": "observation_source_concept_id",
+            "type": "bigint",
+            "mapping": "observation_source_concept_id"
+          },
+          {
+            "name": "unit_source_value",
+            "type": "varchar",
+            "mapping": "unit_source_value"
+          },
+          {
+            "name": "qualifier_source_value",
+            "type": "varchar",
+            "mapping": "qualifier_source_value"
+          }
+        ]
+      }
+    }
 ---
 # ── Coordinator Service ────────────────────────────────────────────────────────
 apiVersion: v1
@@ -258,10 +1063,10 @@ spec:
           resources:
             requests:
               cpu: "500m"
-              memory: "1Gi"
+              memory: "2Gi"
             limits:
               cpu: "2"
-              memory: "2Gi"
+              memory: "4Gi"
           readinessProbe:
             httpGet:
               path: /v1/info

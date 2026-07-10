@@ -4,46 +4,6 @@ metadata:
   name: ignite
 ---
 # ============================================================================
-# RBAC — TcpDiscoveryKubernetesIpFinder 가 Kubernetes API를 호출하는 데 필요
-#
-# 동작 원리:
-#   Ignite Pod 기동 시 Service Account 토큰으로 Kubernetes API Server에 인증 후
-#   GET /api/v1/namespaces/ignite/endpoints/ignite-service 를 호출하여
-#   헤드리스 서비스의 엔드포인트 Pod IP 목록을 가져와 클러스터를 구성한다.
-#
-# 필요 권한: endpoints, pods 의 get / list / watch
-# ============================================================================
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: ignite-sa
-  namespace: ignite
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: ignite-discovery-role
-  namespace: ignite
-rules:
-  - apiGroups: [""]
-    resources: ["endpoints", "pods"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: ignite-discovery-rolebinding
-  namespace: ignite
-subjects:
-  - kind: ServiceAccount
-    name: ignite-sa
-    namespace: ignite
-roleRef:
-  kind: Role
-  name: ignite-discovery-role
-  apiGroup: rbac.authorization.k8s.io
----
-# ============================================================================
 # ConfigMap — ignite-config.xml 과 동기화 유지
 # 설정 변경 시 ignite-config.xml 과 이 ConfigMap 을 함께 수정할 것
 # ============================================================================
@@ -77,16 +37,15 @@ data:
         <property name="clientFailureDetectionTimeout" value="30000"/>
         <property name="systemWorkerBlockedTimeout"    value="30000"/>
 
+        <!-- tryStop/timeout은 2.18.0에서 생성자 인자로만 설정 가능(setter 없음) →
+             property 주입 시 NotWritablePropertyException. 기본 생성자 사용 -->
         <property name="failureHandler">
-          <bean class="org.apache.ignite.failure.StopNodeOrHaltFailureHandler">
-            <property name="tryStop" value="true"/>
-          </bean>
+          <bean class="org.apache.ignite.failure.StopNodeOrHaltFailureHandler"/>
         </property>
 
-        <!-- [2] Discovery SPI — TcpDiscoveryKubernetesIpFinder (K8s 자동 클러스터링)
-             Pod IP가 재기동 시마다 변경되는 K8s 환경에서 정적 IP 관리 불필요.
-             HPA 적용 시 신규 Pod 자동 탐지 가능.
-             사전 요구사항: ignite-sa ServiceAccount에 endpoints/pods 권한 필요 (위 RBAC 참조) -->
+        <!-- [2] Discovery SPI — TcpDiscoveryVmIpFinder (정적 주소 기반)
+             단일 replica 구성이라 K8s API 기반 동적 탐색 불필요.
+             헤드리스 서비스(ignite-svc-headless)의 DNS로 정적 주소 지정 -->
         <property name="discoverySpi">
           <bean class="org.apache.ignite.spi.discovery.tcp.TcpDiscoverySpi">
             <property name="localPort"      value="47500"/>
@@ -97,11 +56,12 @@ data:
             <property name="reconnectCount" value="10"/>
             <property name="joinTimeout"    value="60000"/>
             <property name="ipFinder">
-              <bean class="org.apache.ignite.spi.discovery.tcp.ipfinder.kubernetes.TcpDiscoveryKubernetesIpFinder">
-                <!-- Ignite Pod 가 배포된 Kubernetes 네임스페이스 -->
-                <property name="namespace"   value="ignite"/>
-                <!-- 헤드리스 서비스 이름 — 아래 Service(ignite-service)와 반드시 일치 -->
-                <property name="serviceName" value="ignite-service"/>
+              <bean class="org.apache.ignite.spi.discovery.tcp.ipfinder.vm.TcpDiscoveryVmIpFinder">
+                <property name="addresses">
+                  <list>
+                    <value>ignite-svc-headless:47500..47509</value>
+                  </list>
+                </property>
               </bean>
             </property>
           </bean>
@@ -132,25 +92,25 @@ data:
           </bean>
         </property>
 
-        <!-- [5] DataStorage — 32GB 노드 Pure In-Memory (Off-Heap 23GB)
-             OS 3GB + JVM Heap 6GB + Off-Heap 23GB = 32GB -->
+        <!-- [5] DataStorage — 32GB 노드, Native Persistence 활성화 (재기동 시 데이터 보존)
+             OS 3GB + JVM Heap 6GB + Off-Heap 23GB = 32GB
+             persistence 켜짐 → walMode는 NONE 불가(내구성 보장 안 됨), LOG_ONLY로 변경.
+             pageEvictionMode도 persistent region에서는 미지원(디스크 기반 page replacement로
+             대체됨) → DISABLED로 변경, evictionThreshold/emptyPagesPoolSize 제거 -->
         <property name="dataStorageConfiguration">
           <bean class="org.apache.ignite.configuration.DataStorageConfiguration">
             <!-- pageSize 8KB: Spark/Trino 대량 스캔 시 순차 I/O 효율 향상 -->
             <property name="pageSize" value="8192"/>
-            <property name="walMode"  value="NONE"/>
+            <property name="walMode"  value="LOG_ONLY"/>
             <property name="defaultDataRegionConfiguration">
               <bean class="org.apache.ignite.configuration.DataRegionConfiguration">
                 <property name="name"               value="default_region"/>
-                <property name="persistenceEnabled" value="false"/>
+                <property name="persistenceEnabled" value="true"/>
                 <!-- initialSize: 4GB 사전 확보, maxSize: 23GB = 24,696,061,952 bytes -->
                 <property name="initialSize" value="#{4L * 1024 * 1024 * 1024}"/>
                 <property name="maxSize"     value="24696061952"/>
-                <!-- RANDOM_2_LRU: Hot 데이터 보호 최적 Eviction 정책 (85% 도달 시 작동) -->
-                <property name="pageEvictionMode"   value="RANDOM_2_LRU"/>
-                <property name="evictionThreshold"  value="0.85"/>
-                <property name="emptyPagesPoolSize" value="100"/>
-                <property name="metricsEnabled"     value="true"/>
+                <property name="pageEvictionMode" value="DISABLED"/>
+                <property name="metricsEnabled"   value="true"/>
               </bean>
             </property>
           </bean>
@@ -199,14 +159,14 @@ data:
     </beans>
 ---
 # ============================================================================
-# 헤드리스 서비스 — TcpDiscoveryKubernetesIpFinder 가 참조하는 엔드포인트 소스
+# 헤드리스 서비스 — TcpDiscoveryVmIpFinder 의 정적 주소(ignite-svc-headless)가 참조
 # StatefulSet 의 serviceName 과 일치 → Pod DNS 안정화
-# (ignite-config.xml 의 serviceName="ignite-service" 와 반드시 동일해야 함)
+# (ignite-config.xml discoverySpi.ipFinder.addresses 값과 이름이 동일해야 함)
 # ============================================================================
 apiVersion: v1
 kind: Service
 metadata:
-  name: ignite-service
+  name: ignite-svc-headless
   namespace: ignite
   labels:
     app: ignite
@@ -226,7 +186,7 @@ spec:
       port: 10800
       targetPort: 10800
 ---
-# Trino / Spark / Kafka Thin Client 외부 접근용 ClusterIP 서비스
+# Trino / Spark / Kafka Thin Client 용 클러스터 내부 ClusterIP 서비스
 apiVersion: v1
 kind: Service
 metadata:
@@ -242,6 +202,27 @@ spec:
       port: 10800
       targetPort: 10800
 ---
+# 클러스터 외부(PC 등)에서 JDBC/Thin Client 직접 접근용 NodePort 서비스
+# LoadBalancer 미사용 이유: 이 클러스터에는 cloud-controller-manager(Octavia 연동)가
+# 없어 LoadBalancer 타입 Service가 <pending> 상태로 남기 때문.
+# 접속 예: jdbc:ignite:thin://<임의의-노드-IP>:30800
+apiVersion: v1
+kind: Service
+metadata:
+  name: ignite-external
+  namespace: ignite
+  labels:
+    app: ignite
+spec:
+  type: NodePort
+  selector:
+    app: ignite
+  ports:
+    - name: jdbc
+      port: 10800
+      targetPort: 10800
+      nodePort: 30800
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -249,7 +230,7 @@ metadata:
   namespace: ignite
 spec:
   replicas: 1
-  serviceName: ignite-service   # 헤드리스 서비스와 일치 → Pod DNS: ignite-cluster-N.ignite-service.ignite.svc.cluster.local
+  serviceName: ignite-svc-headless   # 헤드리스 서비스와 일치 → Pod DNS: ignite-cluster-N.ignite-svc-headless.ignite.svc.cluster.local
   selector:
     matchLabels:
       app: ignite
@@ -258,8 +239,6 @@ spec:
       labels:
         app: ignite
     spec:
-      # TcpDiscoveryKubernetesIpFinder 가 K8s API 호출에 사용하는 ServiceAccount
-      serviceAccountName: ignite-sa
       terminationGracePeriodSeconds: 60
       containers:
         - name: ignite-node
@@ -270,9 +249,6 @@ spec:
               value: /opt/ignite/custom-config/ignite-config.xml
             - name: IGNITE_QUIET
               value: "false"
-            # ignite-kubernetes 모듈 활성화 (TcpDiscoveryKubernetesIpFinder 클래스 포함)
-            - name: OPTION_LIBS
-              value: "ignite-kubernetes"
             # ── JVM 힙 설정 ──────────────────────────────────────────────────
             # 32GB 노드 메모리 레이아웃:
             #   OS 마진   : 3GB
