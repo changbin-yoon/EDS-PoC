@@ -14,6 +14,21 @@ stringData:
   username: eds
   password: edsuser123
 ---
+# S3 호환(MinIO) 오브젝트 스토리지 접근 자격 증명 — Barman Cloud 백업/WAL 아카이빙용.
+# airgap 환경에서는 아래 accessKeyId/secretAccessKey 값과 cnpg-cluster.yaml의
+# endpointURL, destinationPath를 실제 사내 MinIO/S3 호환 스토리지 정보로 교체할 것.
+# (이 클러스터에서는 juicefs 네임스페이스에 이미 떠 있는 MinIO를 재사용 —
+#  전용 버킷 eds-pg-backup + 그 버킷에만 권한 있는 IAM 유저 cnpg-backup을 새로 만들어 사용)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cnpg-backup-s3-creds
+  namespace: cnpg
+type: Opaque
+stringData:
+  ACCESS_KEY_ID: cnpg-backup
+  ACCESS_SECRET_KEY: CnpgBackup123!
+---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -37,3 +52,36 @@ spec:
     limits:
       cpu: "1"
       memory: "1Gi"
+  # ── 백업/WAL 아카이빙 (Barman Cloud, in-tree 방식) ──────────────────────────
+  # CNPG 1.26+ 에서는 별도 Barman Cloud Plugin이 권장 경로지만, 그러려면 플러그인
+  # 오퍼레이터/이미지를 추가로 배포해야 해서 airgap에서 준비할 이미지가 하나 더 늘어남.
+  # in-tree barmanObjectStore는 postgres 컨테이너 이미지에 barman-cloud 도구가 이미
+  # 포함돼 있어 추가 이미지 없이 바로 동작 — airgap 단순성 우선으로 이 방식을 선택.
+  # (아직 지원되지만 deprecated 표시가 있으니, 향후 CNPG 버전 올릴 때 플러그인 방식
+  # 전환 여부를 다시 검토할 것)
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://eds-pg-backup/eds-pg
+      endpointURL: http://juicefs-minio.juicefs.svc.cluster.local:9000
+      s3Credentials:
+        accessKeyId:
+          name: cnpg-backup-s3-creds
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: cnpg-backup-s3-creds
+          key: ACCESS_SECRET_KEY
+      wal:
+        compression: gzip
+    retentionPolicy: "7d"
+---
+# 매일 새벽 3시 전체 백업 (스케줄은 airgap 환경 운영 시간에 맞춰 조정)
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: eds-pg-daily-backup
+  namespace: cnpg
+spec:
+  schedule: "0 0 3 * * *"
+  backupOwnerReference: self
+  cluster:
+    name: eds-pg
