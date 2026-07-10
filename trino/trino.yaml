@@ -76,10 +76,12 @@ data:
     redis.key-prefix-schema-table=true
 ---
 # ── Redis 테이블 정의 (예시: default.users — Hash 타입) ──────────────────────
-# 키 형식: default:users:<id>  (redis.key-prefix-schema-table=true)
+# 키 형식: users:<id>  (스키마명 없이 테이블명만 prefix — key-prefix-schema-table=true여도
+# 실제로는 "<schemaName>:<tableName>:"가 아니라 "<tableName>:"만 붙여야 인식됨.
+# 실측: default:users:1로 넣으면 Trino가 0행으로 인식, users:1로 넣어야 조회됨)
 # 데이터 삽입 예시:
-#   redis-cli -a edsuser123 HSET default:users:1 id 1 name "Alice" email "alice@example.com"
-#   redis-cli -a edsuser123 HSET default:users:2 id 2 name "Bob"   email "bob@example.com"
+#   redis-cli -a edsuser123 HSET users:1 id 1 name "Alice" email "alice@example.com"
+#   redis-cli -a edsuser123 HSET users:2 id 2 name "Bob"   email "bob@example.com"
 # Trino 조회:
 #   SELECT * FROM redis.default.users;
 apiVersion: v1
@@ -119,6 +121,69 @@ data:
             "name": "email",
             "type": "varchar",
             "mapping": "email"
+          }
+        ]
+      }
+    }
+
+  # ── death — sample/7.DEATH.csv 와 동일 스키마 (Ignite/PostgreSQL과 교차 비교용) ──
+  # 키 형식: death:<person_id>  (스키마명 없이 테이블명만 prefix — 위 users 예제 주석 참고)
+  # 데이터 삽입 예시:
+  #   redis-cli -a edsuser123 HSET death:<person_id> person_id <id> death_date <date> \
+  #     death_type_concept_id <id> cause_concept_id <id> cause_source_concept_id <id>
+  # death_datetime / cause_source_value 는 원본 CSV에서 전부 빈 값이라
+  # 해시 필드 자체를 생략 — Trino 조회 시 NULL로 반환됨
+  death.json: |
+    {
+      "tableName": "death",
+      "schemaName": "default",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          {
+            "name": "redis_key",
+            "type": "varchar",
+            "hidden": true
+          }
+        ]
+      },
+      "value": {
+        "dataFormat": "hash",
+        "fields": [
+          {
+            "name": "person_id",
+            "type": "bigint",
+            "mapping": "person_id"
+          },
+          {
+            "name": "death_date",
+            "type": "varchar",
+            "mapping": "death_date"
+          },
+          {
+            "name": "death_datetime",
+            "type": "varchar",
+            "mapping": "death_datetime"
+          },
+          {
+            "name": "death_type_concept_id",
+            "type": "bigint",
+            "mapping": "death_type_concept_id"
+          },
+          {
+            "name": "cause_concept_id",
+            "type": "bigint",
+            "mapping": "cause_concept_id"
+          },
+          {
+            "name": "cause_source_value",
+            "type": "varchar",
+            "mapping": "cause_source_value"
+          },
+          {
+            "name": "cause_source_concept_id",
+            "type": "bigint",
+            "mapping": "cause_source_concept_id"
           }
         ]
       }
