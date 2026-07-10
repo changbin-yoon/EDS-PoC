@@ -6,7 +6,7 @@
 # fine; for multi-million-row loads use bulk-load-postgresql.sh /
 # bulk-load-ignite.sh instead (native COPY, much faster).
 #
-# Redis is intentionally excluded — see docs/redis-exclusion-rationale.md.
+# Redis is intentionally excluded — see docs/lessons-learned.md (section 2-1).
 #
 # Usage:
 #   python3 scripts/generate-test-data.py --out-dir /tmp/eds-poc-gen

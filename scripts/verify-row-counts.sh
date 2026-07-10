@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Compares row counts for every table across ignite / postgresql.
-# Redis is intentionally excluded — see docs/redis-exclusion-rationale.md.
+# Redis is intentionally excluded — see docs/lessons-learned.md (section 2-1).
 #
 # Usage: ./scripts/verify-row-counts.sh <generated-files-dir>
 # (uses manifest.txt to know which tables + expected counts to check)

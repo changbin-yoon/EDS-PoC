@@ -6,8 +6,11 @@
 >
 > **Redis 관련 주의**: 배포(1장)와 백업(6장)에는 여전히 Redis가 포함돼 있지만, **성능
 > 테스트/대량 적재 스크립트(4장, 9장)에서는 Redis를 의도적으로 제외**했다. 이유는
-> `docs/redis-exclusion-rationale.md` 참고 — 요약하면 Trino의 Redis 커넥터는 서버사이드
+> `docs/lessons-learned.md` 2-1장 참고 — 요약하면 Trino의 Redis 커넥터는 서버사이드
 > 필터링이 없어 모든 쿼리가 풀스캔이 되고, 실측으로도 항상 가장 느렸다.
+>
+> **결과/원인 분석은 별도 문서**: 이 문서는 순수 절차서다. 실측 수치는
+> `docs/test-results-summary.md`, 버그·아키텍처 통찰은 `docs/lessons-learned.md` 참고.
 
 ---
 
@@ -130,7 +133,7 @@ export KUBECONFIG=<your-kubeconfig>
 ## 3. 재기동/휘발성(persistence) 테스트
 
 세 엔진의 재기동 내구성 차이를 직접 확인하는 절차. (배경: Redis/Ignite는 "인메모리 DB"라
-불리지만 내구성은 persistence 설정에 달려있다 — `docs/in-memory-restart-persistence-test.md` 참고)
+불리지만 내구성은 persistence 설정에 달려있다 — `docs/lessons-learned.md` 2-3장 참고)
 
 ```bash
 # 재기동 전 행 수 기록
@@ -152,7 +155,7 @@ kubectl wait --for=condition=Ready pod -n cnpg -l cnpg.io/cluster=eds-pg --timeo
 
 **만약 `ignite.yaml`의 `persistenceEnabled`를 `false`로 바꿔서 테스트해보면** (원래 이 데이터셋이
 설계된 "Kafka hot buffer" 모드), Ignite만 재기동 후 테이블 자체가 사라지는 걸 확인할 수 있다 —
-이건 버그가 아니라 설계상 당연한 결과다. 자세한 원인은 `docs/in-memory-restart-persistence-test.md` 참고.
+이건 버그가 아니라 설계상 당연한 결과다. 자세한 원인은 `docs/lessons-learned.md` 2-3장 참고.
 
 ---
 
@@ -168,7 +171,7 @@ GROUP BY 집계, JOIN, 반복 실행)를 세 카탈로그에 대해 순서대로
 
 **측정값 해석 시 주의**: 매 쿼리마다 `kubectl exec` + Trino CLI 기동 오버헤드(약 1.3~1.5초)가
 고정으로 들어간다. 따라서 **절대 시간보다 세 엔진 간 상대적인 차이**를 보는 것이 의미 있다.
-기존 실행 결과(참고용, 환경에 따라 달라질 수 있음)는 `docs/trino-three-engines-ops-review.md` 2장 참고.
+기존 실행 결과(참고용, 환경에 따라 달라질 수 있음)는 `docs/test-results-summary.md` 1장 참고.
 
 ---
 
@@ -291,10 +294,9 @@ spec:
 EOF
 ```
 
-이 클러스터에서는 실제로 온디맨드 백업을 트리거해서 MinIO에 `data.tar`(약 53MiB, 적재한
-112,184행 전체 분량)가 정상적으로 쌓이는 것까지 확인했다. 복구(`eds-pg-restored`) 자체는
-별도 인스턴스를 새로 띄우는 것이라 이번 세션에서는 실행하지 않았음 — airgap 재현 시 한 번
-직접 검증해볼 것을 권장한다.
+백업 검증 결과(실제로 MinIO에 파일이 쌓이는 것까지 확인한 내역)는 `docs/test-results-summary.md`
+3장 참고. 복구(`eds-pg-restored`) 자체는 별도 인스턴스를 새로 띄우는 것이라 이번 세션에서는
+실행하지 않았음 — airgap 재현 시 한 번 직접 검증해볼 것을 권장한다.
 
 ---
 
@@ -325,28 +327,18 @@ kubectl exec -n ignite ignite-cluster-0 -- /opt/ignite/apache-ignite/bin/control
 
 ---
 
-## 8. 트러블슈팅 (오늘 실제로 겪은 문제들)
+## 8. 트러블슈팅
 
-| 증상 | 원인 | 해결 |
-|---|---|---|
-| Trino coordinator `OOMKilled` (대량 INSERT 중) | 500행 단위 배치가 너무 커서 파싱 메모리 누적 | coordinator 메모리 limit 상향(2Gi→4Gi), `generate-test-data.py`는 큰 테이블에 자동으로 150행 배치 적용 |
-| Redis 테이블 count가 0 | HSET 값에 공백이 있는데 quote 없이 넘겨서 인자 파싱이 깨짐 | `generate-test-data.py`는 공백 포함 값을 자동으로 큰따옴표로 감쌈 — 직접 `redis-cli`로 수동 삽입할 땐 항상 주의 |
-| Redis 테이블이 항상 0행으로 나옴(신규 테이블 추가 직후) | `redis.key-prefix-schema-table=true`일 때 실제 키 포맷은 `<tableName>:<key>` — `<schemaName>:<tableName>:<key>`가 **아님** | 키를 `<table>:<pk>` 형식으로 넣을 것 (스크립트가 이미 이 형식으로 생성) |
-| Ignite `CrashLoopBackOff`, `ClassNotFoundException: TcpDiscoveryKubernetesIpFinder` | `ignite-config.xml`이 K8s API 기반 탐색을 쓰는데 `OPTION_LIBS=ignite-kubernetes`가 실제 StatefulSet에는 없어서 모듈 미로드 | 단일 replica면 `TcpDiscoveryVmIpFinder`(정적 주소)로 충분 — 이 저장소의 `ignite.yaml`은 이미 이 방식 |
-| Ignite 부팅 시 `NotWritablePropertyException: tryStop` | `StopNodeOrHaltFailureHandler`의 `tryStop`은 Ignite 2.18.0에서 생성자 인자로만 설정 가능(setter 없음) | Spring XML에서 `<property>`로 주입하지 말고 기본 생성자 사용 (이 저장소는 이미 수정됨) |
-| Ignite persistence를 처음 켰는데 쿼리가 안 됨 (`state=INACTIVE`) | persistence를 새로 켠 시점엔 baseline이 없어 자동 활성화가 안 됨 | `control.sh --activate` 1회 수동 실행 (이후 재기동부터는 자동) |
-| `kubectl apply -f ignite.yaml`은 성공했다는데 재기동하면 다른 설정으로 뜸 | StatefulSet의 `serviceName`이 실제 배포본과 어긋나 있으면 `kubectl apply`가 StatefulSet 부분만 조용히 Forbidden 처리 — ConfigMap만 바뀌고 Pod는 옛 프로세스로 계속 떠 있다가, 다음 재기동 때가 돼서야 새 설정을 읽고 터짐 | `kubectl get statefulset ... -o yaml`로 실제 `serviceName`이 파일과 일치하는지 항상 먼저 확인 |
-| Trino에서 Ignite/Redis/PostgreSQL 쿼리가 전부 406 에러 | nginx-ingress가 `X-Forwarded-For` 헤더를 항상 붙이는데 Trino가 forwarded 헤더를 거부하도록 기본 설정돼 있음 | `config.properties`에 `http-server.process-forwarded=true` 추가 (이 저장소는 이미 반영됨) |
-| `kubectl cp`/`psql \copy` 실행 시 `Cannot open: Read-only file system` | CNPG postgres 컨테이너는 `/tmp`가 읽기전용(보안 하드닝) | `/controller` 또는 `/var/lib/postgresql/data` 하위처럼 쓰기 가능한 경로 사용 (`bulk-load-postgresql.sh`는 이미 `/controller` 사용) |
-| `sqlline.sh` 실행이 `Enter username for jdbc:ignite:thin://...`에서 멈춤(EOF 에러) | 비대화형(exec) 환경에서 자격증명 프롬프트가 뜨는데 입력을 못 받음 | `--connectInteractionMode=notAskCredentials`와 `-n`/`-p`(auth 비활성화 상태면 아무 값이나) 옵션 추가 (`bulk-load-ignite.sh`는 이미 반영) |
-| 900만 행 넣었더니 Ignite PVC가 부족할까 걱정됨 | 소규모(수천 행) 테이블에서 본 바이트/행 수치(파티션 오버헤드 지배적)를 그대로 곱하면 과대추정됨 | 단일 테이블에 대량으로 넣을 땐 파티션당 행 수가 늘어나 바이트/행이 오히려 줄어듦 — `docs/large-scale-synthetic-test.md` 3장 실측 참고, 그래도 여유 있게 PVC는 미리 늘려둘 것 |
+실제로 겪은 문제와 원인·해결책은 전부 `docs/lessons-learned.md` 1장(배포/설정 버그 표)에
+정리해뒀다. 여기서는 중복 없이 그 문서를 참고하는 것으로 대신한다 — 증상이 발생하면 그 표에서
+먼저 찾아볼 것.
 
 ---
 
 ## 9. 대용량(수백만 건) 합성 데이터 테스트
 
 OMOP 샘플 CSV가 아니라 **직접 정의한 컬럼/타입으로 임의 데이터를 대량 생성**해서 테스트하고
-싶을 때 쓰는 절차. 자세한 배경과 실측 결과는 `docs/large-scale-synthetic-test.md` 참고.
+싶을 때 쓰는 절차. 자세한 배경과 실측 결과는 `docs/test-results-summary.md` 참고.
 
 ```bash
 # 1) 스키마 정의 (scripts/schema-example.json을 복사해서 컬럼 구성 변경)
@@ -369,14 +361,39 @@ kubectl patch pvc work-ignite-cluster-0 -n ignite -p '{"spec":{"resources":{"req
 ./scripts/perf-test.sh iot_events event_id device_id
 ```
 
-이 클러스터에서 900만 행 기준 실측: PostgreSQL COPY ~30초(~300,000행/초), Ignite COPY 106초
-(~84,000행/초) — 하루 900만 건(평균 초당 104건) 목표치 대비 압도적으로 여유로웠다.
+실측 결과(적재 속도, 스토리지, 성능, `query_parallelism` 튜닝 전/후 비교)는
+`docs/test-results-summary.md` 4장 참고.
+
+### Ignite 쿼리 병렬도(`query_parallelism`) 튜닝
+
+Trino `CREATE TABLE`로 만든 Ignite 테이블은 `query_parallelism`이 기본값 1로 생성된다 —
+GROUP BY처럼 전체 행을 훑어야 하는 쿼리에서 단일 스레드로만 처리되어 느려질 수 있다
+(자세한 진단 경위는 `docs/lessons-learned.md` 2-4장). 파드에 할당된 CPU limit에 맞춰
+재생성하는 걸 권장:
+
+```bash
+# 1) 기존 테이블 삭제 (Trino 경유)
+COORD=$(kubectl get pod -n trino -l app=trino -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n trino "$COORD" -- trino --execute "DROP TABLE IF EXISTS ignite.public.<table>;"
+
+# 2) Ignite 네이티브 SQL로 parallelism 지정해서 재생성 (컬럼 정의는 <csv>.ignite.create.sql 참고)
+IGNITE_POD=$(kubectl get pod -n ignite -l app=ignite -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n ignite "$IGNITE_POD" -- /opt/ignite/apache-ignite/bin/sqlline.sh \
+  -u "jdbc:ignite:thin://127.0.0.1:10800/" -n ignite -p ignite --connectInteractionMode=notAskCredentials \
+  -e "CREATE TABLE PUBLIC.<TABLE> (... , PRIMARY KEY (...)) WITH \"template=partitioned,backups=0,parallelism=<CPU_LIMIT>\";"
+
+# 3) 데이터 재적재 (bulk-load-ignite.sh는 테이블이 이미 있으면 CREATE는 건너뛰고 COPY만 실행됨)
+./scripts/bulk-load-ignite.sh /tmp/synthetic.csv
+```
+
+`<CPU_LIMIT>`은 `kubectl get statefulset ignite-cluster -n ignite -o jsonpath='{...resources.limits.cpu}'`로
+확인한 실제 cgroup 할당량을 쓸 것 — 컨테이너 안에서 `nproc`으로 보이는 값은 host 전체 코어 수라
+오해하기 쉽다.
 
 ---
 
 ## 10. 결과 정리 방법
 
-성능 지표를 뽑았으면 `docs/trino-three-engines-ops-review.md`의 2장 표 형식을 그대로 참고해서
-자신의 환경 결과로 갱신하면 된다. 절대 수치는 환경(노드 스펙, 네트워크)마다 다르게 나올 수
-있으니, 이 문서의 수치와 비교할 땐 상대적인 순위(어떤 엔진이 어떤 쿼리 유형에서 유리한가)
-위주로 보는 것을 권장한다.
+성능 지표를 뽑았으면 `docs/test-results-summary.md`의 표 형식을 그대로 참고해서 자신의 환경
+결과로 갱신하면 된다. 절대 수치는 환경(노드 스펙, 네트워크)마다 다르게 나올 수 있으니, 이 문서의
+수치와 비교할 땐 상대적인 순위(어떤 엔진이 어떤 쿼리 유형에서 유리한가) 위주로 보는 것을 권장한다.

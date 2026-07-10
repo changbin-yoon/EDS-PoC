@@ -5,8 +5,7 @@
 # Trino CLI startup overhead — compare relative differences between
 # engines, not absolute numbers).
 #
-# Redis is intentionally excluded — see docs/trino-three-engines-ops-review.md
-# and docs/redis-exclusion-rationale.md for why.
+# Redis is intentionally excluded — see docs/lessons-learned.md (section 2-1).
 #
 # Usage:
 #   ./scripts/perf-test.sh <table> <pk_column> <group_by_column>
