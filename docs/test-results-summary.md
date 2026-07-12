@@ -350,3 +350,105 @@ Ignite가 5.8배 더 쓰는데, 이 중 절반(`backups=1`로 인한 2벌 저장
 보인다(4-2장에서도 같은 방향의 차이를 확인했다 — 222B vs 130B/행). WAL은 Ignite는 로컬 디스크에
 고정 크기로 쌓이는 반면 PostgreSQL(CNPG)은 오브젝트 스토리지로 계속 흘려보내는 구조라 이 표의
 로컬 디스크 사용량 비교에는 안 잡힌다.
+
+---
+
+## 9. PostgreSQL 2인스턴스 확장 + PgBouncer(Pooler) 동시성 테스트
+
+지금까지의 측정(1~8장)은 전부 "쿼리 하나를 던지고 응답 시간을 재는" 방식이었다. 이번에 검증한
+두 가지 — CNPG `instances: 2`(primary + streaming replica)와 PgBouncer — 는 그 방식으로는
+**효과가 안 보이는 게 정상**이다. streaming replica는 전체 데이터의 물리적 복사본이지 단일
+쿼리를 나눠 처리하는 구조가 아니고(Ignite의 파티션 병렬화와 전혀 다른 메커니즘), PgBouncer는
+쿼리 연산이 아니라 **연결 생성 비용**을 아끼는 물건이다. 그래서 이 장만 측정 방식을 바꿨다 —
+`pgbench`로 동시 클라이언트 20개를 붙여 처리량(tps)을 쟀다.
+
+### 9-1. 적용한 변경
+
+- CNPG `Cluster`의 `instances`를 1 → **2**로 (primary 1 + streaming replica 1)
+- CNPG 네이티브 `Pooler` CRD로 PgBouncer 2세트 배포: `eds-pg-pooler-rw`(primary로),
+  `eds-pg-pooler-ro`(replica로) — 둘 다 `poolMode: transaction`, `default_pool_size: 25`,
+  `max_client_conn: 1000`
+- 측정 쿼리는 인덱스 있는 필터(`SELECT count(*) FROM iot_events WHERE device_id = :random`) —
+  900만 행 테이블이지만 인덱스 덕에 단건 0.7ms짜리라, 연결/분산 오버헤드가 잘 드러나는 부하
+
+`pgbench`는 `eds-pg-1` 파드 안에서 실행 (`-c 20 -j 4 -T 15`, 스크립트는 `/controller/` 경로 사용 —
+`/tmp`는 읽기전용, `docs/lessons-learned.md` 1장 표 참고). 모든 테스트를 2회씩 돌려 run-to-run
+편차를 같이 확인했다.
+
+### 9-2. 인스턴스 확장 효과 — 상시 연결, 20 동시 클라이언트
+
+| 대상 | tps (1차) | tps (2차) | 평균 지연 |
+|---|---|---|---|
+| `eds-pg-rw` (primary 단독) | 27,976 | 27,477 | 0.72ms |
+| `eds-pg-r` (primary+replica round-robin) | **39,783** | **40,852** | **0.50ms** |
+
+**약 1.42~1.49배 개선.** 동시 읽기 부하가 두 인스턴스의 CPU/메모리로 실제로 분산된 결과다 —
+인스턴스가 각각 완전한 복사본이라 커넥션 단위로 부하를 나누는, 순수한 scale-out 효과.
+(2배가 아닌 건 pgbench 자신이 primary 파드 안에서 돌면서 CPU를 나눠 쓰는 점, round-robin이
+정확히 반반은 아닌 점 등이 섞인 것으로 보이고, 깊게 파진 않았다.)
+
+### 9-3. PgBouncer 효과 — 매 트랜잭션 재연결(`-C`), 20 동시 클라이언트
+
+| 대상 | tps (1차) | tps (2차) | 평균 지연 | 연결 시간 |
+|---|---|---|---|---|
+| `eds-pg-rw` 직결 | 206.9 | 183.4 | 96.7 / 109.0ms | 19.3 / 21.7ms |
+| `eds-pg-pooler-rw` 경유 | 199.7 | 201.2 | 100.1 / 99.4ms | 20.0 / 19.8ms |
+
+**측정 가능한 이득이 없었다.** 1차에서는 직결이 근소하게 빨랐고 2차에서는 pooler가 근소하게
+빨랐다 — 순위가 뒤집힐 정도로 차이가 run-to-run 편차(±6% 수준) 안에 묻힌다. PgBouncer의
+교과서적 존재 이유가 "매 연결마다 postgres 백엔드 프로세스를 새로 띄우는 비용을 서버 커넥션
+재사용으로 없앤다"인데, 그 효과가 이 조건에서는 전혀 안 보였다.
+
+원인은 확정하지 못했고, 정황 증거만 있다: **직결이든 pooler 경유든 연결 시간이 19~22ms로
+사실상 동일**했다. PgBouncer도 들어오는 클라이언트 연결마다 인증(SCRAM 협상)은 그대로 다
+하기 때문에, 연결 비용의 대부분이 백엔드 프로세스 생성이 아니라 인증 왕복이라면 pooler를
+거쳐도 아낄 게 없다. 게다가 이 테스트는 클러스터 내부의 저지연 네트워크에서 돌린 거라
+애초에 아낄 연결 비용 자체가 작았을 수 있다. 어디까지나 추정이다 — 더 큰 pool, 외부 네트워크
+지연이 있는 클라이언트, md5 vs SCRAM 비교로 연결 비용의 구성을 분리해보는 게 다음 세션 후보다.
+
+### 9-4. 운영 관점 정리
+
+이번 검증과 무관하게, 운영 배포 시 권장 패턴은 이번에 구성한 형태 그대로다 — PgBouncer를
+Deployment로 직접 만들지 말고 **CNPG 네이티브 `Pooler` CRD**로, 쓰기용(`type: rw`)과
+읽기용(`type: ro`)을 분리해서 두고 앱이 쿼리 성격에 따라 나눠 붙는 구조. `instances: 2`는
+성능 이전에 HA(primary 장애 시 replica 승격)를 위한 흔한 최소 구성이고, 읽기 처리량 1.4배는
+거기에 따라오는 덤에 가깝다.
+
+---
+
+## 10. Trino Kafka 커넥터 확인 (10만 건)
+
+Trino에 `kafka` 카탈로그를 붙이고(`trino/trino.yaml` 참고, Strimzi `my-cluster`의
+`device_events` 토픽), pushdown 여부와 실제 성능을 확인했다.
+
+### 10-1. EXPLAIN — 필터도 집계도 안 내려간다
+
+`WHERE device_id = 3`과 `GROUP BY event_type` 둘 다 `EXPLAIN`으로 확인한 결과, JDBC 계열
+커넥터처럼 쿼리가 `TableScan`의 내부 쿼리 문자열로 내려가는 게 아니라 **Trino 자신의
+`ScanFilterProject`(필터)와 `Aggregate PARTIAL/FINAL`(집계) 연산자로 처리**된다 — Redis와
+같은 구조다. Kafka 서버가 할 수 있는 건 offset 범위의 순차 소비뿐이라, 어떤 쿼리든 토픽
+전체를 읽어와서 Trino가 거른다.
+
+### 10-2. 10만 건 적재 후 실측
+
+`device_id`(1~50,000 랜덤)/`event_type`(3종)/`value` 형태의 JSON 메시지 100,000건을
+`kafka-console-producer.sh`로 적재(기존 테스트 메시지 10건 포함 총 100,010건, offset으로 확인).
+
+| 쿼리 (Trino 경유, `kubectl exec` 왕복 포함) | 소요 시간 |
+|---|---|
+| `COUNT(*)` | 2.98s |
+| `WHERE device_id = ?` (결과 2행) | 3.06s |
+| `GROUP BY event_type` | 2.95s |
+| `COUNT(*)` 재실행(warm) | 2.29s |
+
+**필터 쿼리(결과 2행)가 전체 COUNT와 비용이 같다** — 조건이 뭐든 토픽 전체 소비라는 구조가
+숫자로 그대로 드러난다. 비슷한 규모(112K행)의 Redis 결과(1장: 2.27~2.98s)와 같은 수준이거나
+약간 더 느리고, 데이터가 늘면 비용이 정비례로 늘어난다는 점도 같다.
+
+### 10-3. 결론
+
+**Kafka도 Redis와 같은 이유로 Trino 기반 분석 쿼리 대상에서 제외한다.** 구조적으로는 Redis보다
+더 나쁘다 — Redis는 최소한 O(1) 키 접근이라도 있는데(Trino가 못 살릴 뿐), Kafka는 로그라
+그런 접근 자체가 없다. 자세한 논의는 `docs/lessons-learned.md` 2-10장. 카탈로그 연결 절차는
+`docs/airgap-full-test-runbook.md` 10장에 남겨뒀다 — 토픽 내용물을 SQL로 잠깐 들여다보는
+디버깅 용도로는 여전히 쓸모 있기 때문.

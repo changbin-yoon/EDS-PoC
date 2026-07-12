@@ -20,6 +20,7 @@
 | `kubectl cp`/`psql \copy` 실행 시 `Cannot open: Read-only file system` | CNPG postgres 컨테이너는 `/tmp`가 읽기전용(보안 하드닝) | `/controller` 또는 `/var/lib/postgresql/data` 하위처럼 쓰기 가능한 경로 사용 |
 | `sqlline.sh`가 `Enter username for jdbc:ignite:thin://...`에서 멈춤(EOF 에러) | 비대화형(exec) 환경에서 자격증명 프롬프트가 뜨는데 입력을 못 받음 | `--connectInteractionMode=notAskCredentials` + `-n`/`-p`(auth 비활성화 상태면 아무 값) 옵션 추가 |
 | StatefulSet을 1→3 replica로 늘렸는데 새 노드에 데이터가 안 감 | `kubectl scale`/replica 수 변경만으로는 새로 조인한 노드가 클러스터 **topology**엔 들어가지만 persistence의 **baseline**엔 자동으로 안 들어감(auto-adjust가 기본 비활성화) — 파티션 재분배가 아예 안 일어남 | `control.sh --baseline add <consistentId1>,<consistentId2> --yes`로 수동 추가해야 실제로 리밸런싱이 시작됨. `--yes` 없으면 비대화형 환경에서 확인 프롬프트 때문에 멈춤(위 sqlline과 같은 패턴) |
+| Kafka 파드로 `kubectl cp` 하다가 `Wrote only 6656 of 10240 bytes`로 중단, 파일이 잘려서 들어감 | Strimzi Kafka 컨테이너의 `/tmp`가 **5MB짜리 tmpfs** — 대량 메시지 파일 스테이징 용도로는 못 씀 | 데이터 PVC 마운트 경로(`/var/lib/kafka/data-0`)에 복사해서 사용 (작업 후 삭제). CNPG의 읽기전용 `/tmp`와 마찬가지로 "파드의 `/tmp`는 믿지 말 것" 계열 |
 
 ---
 
@@ -133,6 +134,55 @@ Ignite 옵티마이저가 새 인덱스를 이용한 "group sorted"(인덱스를
 그 엔진의 옵티마이저가 그 상황에서 올바른 선택을 하는지까지 확인해야 한다** — 옵티마이저의
 성숙도 차이가 여기서도 드러났다.
 
+### 2-9. PostgreSQL replica 확장은 효과가 실측됐는데, PgBouncer는 교과서적 기대와 달리 이득이 안 잡혔다
+
+CNPG `instances`를 1→2로 늘리고(primary + streaming replica) PgBouncer(`Pooler` CRD,
+transaction 모드)를 앞에 세운 뒤, 이번엔 단일 쿼리 시간이 아니라 `pgbench` 동시성(20 클라이언트)
+방식으로 측정했다 — replica도 PgBouncer도 단일 쿼리를 빠르게 하는 물건이 아니라서, 기존 측정
+방식으로는 애초에 효과가 보일 수 없기 때문이다 (replica는 단일 쿼리를 병렬화하지 않고, PgBouncer의
+효용은 수많은 짧은 연결의 생성 비용 상각이다).
+
+결과는 반반이었다:
+
+- **인스턴스 확장은 기대대로 동작했다.** 20 동시 클라이언트를 `-r` 서비스(round-robin)로
+  분산시키니 primary 단독 대비 처리량 약 1.42~1.49배, 지연도 감소. 각 replica가 자기 CPU/메모리를
+  가진 완전한 복사본이라 커넥션 단위로 부하가 실제로 나눠지는, Ignite의 `query_parallelism`
+  (노드 내 병렬화)과는 전혀 다른 메커니즘의 순수 scale-out이다.
+- **PgBouncer는 이득이 측정되지 않았다 — 오히려 순위가 run마다 뒤집힐 정도로 차이가 없었다.**
+  매 트랜잭션 재연결(`-C`) 부하에서 직결 206.9/183.4 tps vs pooler 경유 199.7/201.2 tps (2회 측정).
+  "백엔드 프로세스 생성 비용을 서버 커넥션 재사용으로 없앤다"는 PgBouncer의 고전적 존재 이유가
+  이 조건에서는 전혀 안 나타났다.
+
+원인은 확정 못 했다. 정황 증거는 하나 있다 — **연결 시간이 직결이든 pooler든 19~22ms로 사실상
+동일**했다는 것. PgBouncer도 들어오는 클라이언트 연결마다 인증(SCRAM 협상)을 그대로 다 하므로,
+연결 비용의 대부분이 백엔드 생성이 아니라 인증 왕복이라면 pooler로 아낄 게 없다. 클러스터 내부
+저지연 네트워크라 애초에 아낄 비용 자체가 작았을 가능성도 있다. 어느 쪽이든 추정일 뿐이라
+단정하지 않는다 — 외부 네트워크 지연이 있는 클라이언트, 더 큰 pool, md5 vs SCRAM 비교가 다음
+세션 후보다. 숫자는 `docs/test-results-summary.md` 9장.
+
+### 2-10. Kafka를 Trino로 조회하는 건 Redis보다 구조적으로 더 나쁘다 — 다만 애초에 그럴 용도가 아니었다
+
+Trino에 `kafka` 카탈로그를 붙이고 `EXPLAIN`으로 확인해보니 **필터도 집계도 Kafka로 안 내려간다** —
+`WHERE device_id = 3`은 Trino 자신의 `ScanFilterProject`의 `filterPredicate`로, GROUP BY는 Trino의
+`Aggregate PARTIAL/FINAL` 연산자로 처리된다. JDBC 커넥터들처럼 쿼리 문자열이 `TableScan` 안에
+통째로 들어가는 형태가 아니다. Redis(2-1)와 같은 계열의 문제인데, 구조적으로는 더 나쁘다:
+
+- Redis는 서버에 O(1) 키 접근이라도 있다(Trino가 못 살릴 뿐). **Kafka는 로그라 키 기반 접근
+  자체가 없고, offset 범위의 순차 소비가 유일한 읽기 방식이다** — 어떤 쿼리든 토픽 전체를
+  읽어와서 Trino가 걸러야 한다.
+- 실측(10만 건)으로도 그대로 나왔다: 결과 2행짜리 필터 쿼리(3.06s)가 전체 COUNT(2.98s)와 비용이
+  같다. 비슷한 규모(112K행)의 Redis(2.27~2.98s)와 같은 수준이거나 약간 느리고, 데이터가 늘면
+  정비례로 늘어난다.
+
+그래서 **Kafka도 Redis와 같은 이유로 Trino 기반 분석 쿼리 대상에서 제외한다.** 단, Redis와
+결이 다른 점이 하나 있다 — Redis는 "직접 클라이언트로 붙는 캐시"라는 실제 용도가 남지만,
+Kafka는 이 아키텍처에서 애초에 SQL로 조회하는 용도로 설계된 적이 없다. 원래 그림은
+Kafka ──[IgniteKafkaStreamer]──▶ Ignite(hot buffer)로 **흘려보내는 스트림**이었다
+(`ignite/ignite.yaml` 상단 아키텍처 주석 참고). 즉 이번 발견은 계획의 번복이 아니라 확인에
+가깝다 — Kafka를 Trino SQL로 조회할 이유는 임시 탐색/디버깅("토픽에 지금 뭐가 들었지?")뿐이고,
+그 용도라면 느려도 감수할 만하다. 그 용도를 위해 카탈로그 연결 자체는 남겨뒀다
+(`docs/airgap-full-test-runbook.md` 10장).
+
 ---
 
 ## 3. 운영/복구 관련 통찰
@@ -208,6 +258,8 @@ SPOF.
 | ★ `max_parallel_workers_per_gather` | 2→4 | CPU limit 상향과 같이 적용, 개선에 기여 |
 | ★ 보조 인덱스 (`device_id`) | 추가함, 단순 필터 2배(0.50s→0.23s)·GROUP BY 2배(1.07s→0.52s) 개선 | 옵티마이저가 "Parallel Index Only Scan"으로 똑똑하게 활용 — Ignite와 달리 인덱스 추가로 손해 보는 쿼리가 하나도 없었음 |
 | JOIN 성능 | 인덱스 추가해도 1.46s로 변화 없음 | 이미 충분히 빨라서(원래도 Ignite 대비 12배) 인덱스 유무가 체감되지 않는 수준 |
+| ★ 인스턴스 수 (CNPG) | 1→2 (primary + streaming replica) + `Pooler`(rw/ro) 배포 | 20 동시 클라이언트 읽기 처리량 1.42~1.49배 개선 확인. 단일 쿼리 지연에는 효과 없음(설계상 당연 — replica는 단일 쿼리를 병렬화하지 않음). HA가 본 목적, 처리량은 덤 |
+| PgBouncer 효과 | transaction 모드 Pooler 경유 `-C` 테스트에서 직결 대비 이득 없음 (2-9 참고) | 원인 미확정 — 인증(SCRAM) 왕복이 연결 비용을 지배한다는 추정만 있음. 다음 세션 후보 참고 |
 
 ### Trino
 
@@ -227,3 +279,5 @@ SPOF.
 - `backups=0` vs `backups=1`로 순수 노드 확장 효과와 복제 오버헤드를 분리해서 측정 (지금은 둘을
   같이 바꿔서 어느 쪽 기여가 큰지 분리 안 됨)
 - 상시 연결 클라이언트로 고정 오버헤드 없이 재측정
+- PgBouncer 무이득(2-9) 원인 규명: 외부 네트워크 지연이 있는 클라이언트에서 재측정, pool 크기
+  상향, md5 vs SCRAM 인증 비교로 연결 비용에서 인증 왕복이 차지하는 비중 분리

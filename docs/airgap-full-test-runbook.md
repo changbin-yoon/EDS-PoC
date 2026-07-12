@@ -392,7 +392,79 @@ kubectl exec -n ignite "$IGNITE_POD" -- /opt/ignite/apache-ignite/bin/sqlline.sh
 
 ---
 
-## 10. 결과 정리 방법
+## 10. Trino Kafka 카탈로그 연결 (참고 — 분석 쿼리 용도로는 비권장)
+
+Kafka 토픽을 Trino에서 SQL로 조회할 수 있게 연결하는 절차. **성능 테스트 결과 분석 쿼리
+용도로는 부적합**하다(모든 쿼리가 토픽 전체 소비 — `docs/lessons-learned.md` 2-10장 참고).
+"토픽에 지금 뭐가 들었는지" SQL로 잠깐 들여다보는 임시 탐색/디버깅 용도로만 쓸 것.
+
+전제: Strimzi Kafka 클러스터가 `kafka` 네임스페이스에 떠 있음
+(bootstrap: `my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092`, 파드 `my-cluster-dual-role-0`).
+airgap 이미지 목록에 Strimzi 오퍼레이터/Kafka 이미지는 별도 반입 필요 (이 저장소 범위 밖).
+
+### 10-1. trino.yaml에 이미 들어있는 것
+
+`trino/trino.yaml`에 아래 세 가지가 반영돼 있다 — 다른 토픽을 붙이려면 이 부분을 수정:
+
+1. `trino-catalog` ConfigMap의 `kafka.properties` — `kafka.nodes`(bootstrap 주소),
+   `kafka.table-names=default.device_events`(노출할 토픽 목록, 쉼표 구분으로 추가)
+2. `trino-kafka-tables` ConfigMap — 토픽별 JSON 테이블 정의(`device_events.json` 참고:
+   `topicName`, message `dataFormat: json`, 컬럼→JSON 필드 매핑). Redis의
+   `trino-redis-tables`와 같은 방식
+3. Deployment의 volume/volumeMount — `kafka.properties`와 `/etc/trino/kafka-tables` 마운트
+
+적용 후 Trino 재시작이 필요하다:
+
+```bash
+kubectl apply -f trino/trino.yaml
+kubectl rollout restart deployment/trino-coordinator -n trino
+kubectl rollout status deployment/trino-coordinator -n trino
+```
+
+### 10-2. 테스트 메시지 대량 적재
+
+메시지를 한 건씩 넣지 말고 newline-delimited JSON 파일로 만들어 한 번에 파이프로 넣는다:
+
+```bash
+# 1) 로컬에서 10만 건 생성
+python3 -c "
+import json, random
+random.seed(42)
+types = ['TEMP', 'HUMIDITY', 'PRESSURE']
+with open('/tmp/kafka_msgs.json', 'w') as f:
+    for _ in range(100000):
+        f.write(json.dumps({'device_id': random.randint(1, 50000),
+                            'event_type': random.choice(types),
+                            'value': round(random.uniform(0, 100), 2)}) + '\n')
+"
+
+# 2) Kafka 파드로 복사 — 반드시 데이터 PVC 경로로! (/tmp는 5MB tmpfs라 잘림)
+kubectl cp /tmp/kafka_msgs.json kafka/my-cluster-dual-role-0:/var/lib/kafka/data-0/kafka_msgs.json -c kafka
+
+# 3) 한 번에 produce 후 스테이징 파일 삭제
+kubectl exec -n kafka my-cluster-dual-role-0 -c kafka -- bash -c \
+  'bin/kafka-console-producer.sh --topic device_events --bootstrap-server localhost:9092 \
+     < /var/lib/kafka/data-0/kafka_msgs.json && rm /var/lib/kafka/data-0/kafka_msgs.json'
+
+# 4) 적재 건수 확인 (파티션별 offset 합계가 총 메시지 수)
+kubectl exec -n kafka my-cluster-dual-role-0 -c kafka -- \
+  bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic device_events
+```
+
+### 10-3. Trino에서 조회
+
+```bash
+COORD=$(kubectl get pod -n trino -l app=trino -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n trino "$COORD" -- trino --execute \
+  "SELECT event_type, count(*) FROM kafka.default.device_events GROUP BY event_type;"
+```
+
+어떤 쿼리든(결과가 몇 행이든) 토픽 전체를 소비하므로, 토픽이 커질수록 정비례로 느려진다는
+점을 감안할 것. 실측 수치는 `docs/test-results-summary.md` 10장.
+
+---
+
+## 11. 결과 정리 방법
 
 성능 지표를 뽑았으면 `docs/test-results-summary.md`의 표 형식을 그대로 참고해서 자신의 환경
 결과로 갱신하면 된다. 절대 수치는 환경(노드 스펙, 네트워크)마다 다르게 나올 수 있으니, 이 문서의

@@ -231,7 +231,7 @@ metadata:
   name: ignite-cluster
   namespace: ignite
 spec:
-  replicas: 3   # 3노드 확장 + affinity key 기반 collocated join 검증용 (docs/lessons-learned.md 참고)
+  replicas: 1   # 3노드+affinity key 검증(docs/lessons-learned.md 참고) 완료 후 리소스 회수를 위해 1로 복귀
   serviceName: ignite-svc-headless   # 헤드리스 서비스와 일치 → Pod DNS: ignite-cluster-N.ignite-svc-headless.ignite.svc.cluster.local
   selector:
     matchLabels:

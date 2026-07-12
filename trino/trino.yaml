@@ -74,6 +74,41 @@ data:
     redis.table-description-dir=/etc/trino/redis-tables
     redis.hide-internal-columns=false
     redis.key-prefix-schema-table=true
+
+  kafka.properties: |
+    connector.name=kafka
+    kafka.nodes=my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092
+    kafka.table-description-dir=/etc/trino/kafka-tables
+    kafka.table-names=default.device_events
+    kafka.hide-internal-columns=false
+---
+# ── Kafka 테이블 정의 (pushdown 검증용, device_events 토픽) ──────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trino-kafka-tables
+  namespace: trino
+data:
+  device_events.json: |
+    {
+      "tableName": "device_events",
+      "schemaName": "default",
+      "topicName": "device_events",
+      "key": {
+        "dataFormat": "raw",
+        "fields": [
+          { "name": "kafka_key", "type": "VARCHAR", "hidden": true }
+        ]
+      },
+      "message": {
+        "dataFormat": "json",
+        "fields": [
+          { "name": "device_id",  "mapping": "device_id",  "type": "BIGINT" },
+          { "name": "event_type", "mapping": "event_type", "type": "VARCHAR" },
+          { "name": "value",      "mapping": "value",      "type": "DOUBLE" }
+        ]
+      }
+    }
 ---
 # ── Redis 테이블 정의 (예시: default.users — Hash 타입) ──────────────────────
 # 키 형식: users:<id>  (스키마명 없이 테이블명만 prefix — key-prefix-schema-table=true여도
@@ -1058,8 +1093,13 @@ spec:
             - name: catalog
               mountPath: /etc/trino/catalog/redis.properties
               subPath: redis.properties
+            - name: catalog
+              mountPath: /etc/trino/catalog/kafka.properties
+              subPath: kafka.properties
             - name: redis-tables
               mountPath: /etc/trino/redis-tables
+            - name: kafka-tables
+              mountPath: /etc/trino/kafka-tables
           resources:
             requests:
               cpu: "500m"
@@ -1090,6 +1130,9 @@ spec:
         - name: redis-tables
           configMap:
             name: trino-redis-tables
+        - name: kafka-tables
+          configMap:
+            name: trino-kafka-tables
 ---
 # ── Trino UI Ingress ───────────────────────────────────────────────────────────
 apiVersion: networking.k8s.io/v1

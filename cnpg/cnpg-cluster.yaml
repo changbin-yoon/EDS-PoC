@@ -35,7 +35,7 @@ metadata:
   name: eds-pg
   namespace: cnpg
 spec:
-  instances: 1
+  instances: 2   # primary 1 + streaming replica 1 — 운영에서 흔한 최소 HA 구성, PgBouncer(Pooler)와 짝
   bootstrap:
     initdb:
       database: eds
@@ -97,3 +97,41 @@ spec:
   backupOwnerReference: self
   cluster:
     name: eds-pg
+---
+# PgBouncer(쓰기용) — eds-pg-rw(primary)로만 연결. 앱은 쓰기 쿼리를 이 서비스로 보냄.
+# 운영 권장 패턴: 직접 만든 PgBouncer Deployment가 아니라 CNPG 네이티브 Pooler CRD로
+# rw/ro 두 벌을 두고 앱이 쿼리 성격에 따라 나눠 붙는 구조.
+# 단, 클러스터 내부 pgbench 실측에서는 직결 대비 연결 비용 절감이 측정되지 않았음
+# (원인 미확정 — docs/test-results-summary.md 9장, docs/lessons-learned.md 2-9 참고).
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: eds-pg-pooler-rw
+  namespace: cnpg
+spec:
+  cluster:
+    name: eds-pg
+  instances: 2
+  type: rw
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "1000"
+      default_pool_size: "25"
+---
+# PgBouncer(읽기용) — eds-pg-ro(replica들)로 round-robin. 앱은 읽기 쿼리를 이 서비스로 보냄.
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: eds-pg-pooler-ro
+  namespace: cnpg
+spec:
+  cluster:
+    name: eds-pg
+  instances: 2
+  type: ro
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "1000"
+      default_pool_size: "25"
