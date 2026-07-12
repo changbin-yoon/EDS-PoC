@@ -208,6 +208,72 @@ Ignite를 앞선다** — 특히 JOIN은 17.27s vs 1.46s로 12배, 단순 필터
 
 ---
 
-## 6. 재현 방법
+## 6. 인덱스 적용 후 재측정
 
-전체 재현 절차는 `docs/airgap-full-test-runbook.md` 참고.
+5장까지는 두 엔진 다 PK(`event_id`) 외엔 인덱스가 전혀 없는 상태였다. 자주 필터/조인에 쓰는
+`device_id` 컬럼에 인덱스를 걸고(`iot_events.device_id`) 5장과 같은 쿼리셋을 다시 측정했다.
+
+### 6-1. 인덱스 생성 자체도 속도 차이가 컸다
+
+900만 행 기준 `CREATE INDEX`:
+
+| 엔진 | 소요 시간 |
+|---|---|
+| PostgreSQL | 4.1초 |
+| Ignite | 60.6초 |
+
+### 6-2. 결과 — Trino 경유
+
+| 쿼리 | ignite (인덱스 전) | ignite (인덱스 후) | postgresql (인덱스 전) | postgresql (인덱스 후) |
+|---|---|---|---|---|
+| 단순 필터 (`device_id = ?`) | 8.74s | **1.55s** | 1.89s | 1.64s |
+| `GROUP BY device_id` | 6.37s | **13.78s** (악화) | 3.52s | **2.22s** |
+| JOIN | 18.75s | **24.47s** (악화) | 11.29s | 11.56s |
+
+### 6-3. 결과 — 엔진 직접 질의 (Trino 미경유)
+
+| 쿼리 | ignite (인덱스 전) | ignite (인덱스 후) | postgresql (인덱스 전) | postgresql (인덱스 후) |
+|---|---|---|---|---|
+| 단순 필터 | 4.58s | **0.90s** | 0.50s | **0.23s** |
+| `GROUP BY device_id` | 5.91s | **12.05s** (악화) | 1.07s | **0.52s** |
+| JOIN | 17.27s | **2.93s** | 1.46s | 1.46s (변화 없음) |
+
+### 6-4. 해석 — 인덱스가 항상 이득은 아니다
+
+**단순 필터**는 두 엔진 다 개선(Ignite는 5배, PostgreSQL은 2배) — 예상대로다.
+
+**JOIN은 Ignite에서 극적으로 개선됐다** (직접 질의 기준 17.27s→2.93s, 약 6배). 조인 키에
+인덱스가 있으니 상대 테이블의 각 행을 찾을 때 풀스캔 대신 인덱스로 바로 찾아간 것으로 보인다.
+PostgreSQL은 원래도 빨랐어서(1.46s) 변화가 거의 없었다.
+
+**GROUP BY는 Ignite에서 오히려 2배 나빠졌다.** `EXPLAIN`으로 확인해보니 Ignite 옵티마이저가
+새로 생긴 인덱스를 이용한 "group sorted" 집계 전략을 선택했는데, 이게 기존의 풀스캔+해시 집계보다
+느렸다. 즉 **인덱스가 있다고 옵티마이저가 항상 더 나은 계획을 고르는 게 아니다** — 이번 케이스는
+Ignite의 비용 기반 최적화가 잘못된 선택을 한 사례로 보인다. 반대로 PostgreSQL은 같은 인덱스를
+"Parallel Index Only Scan"으로 활용해 오히려 개선(1.07s→0.52s)됐다 — 옵티마이저 성숙도 차이가
+드러난 지점이다.
+
+### 6-5. 결론
+
+인덱스 하나로 상황이 또 한 번 바뀌었다 — **JOIN과 단순 필터는 Ignite도 인덱스 덕에 크게
+개선되어 PostgreSQL과 격차가 좁혀지거나(단순 필터) 비슷한 수준까지 따라왔지만(JOIN, 직접 질의
+기준 2.93s vs 1.46s), GROUP BY는 인덱스가 Ignite에는 오히려 독이 됐다.** 워크로드 성격에 따라
+인덱스를 걸지 말지, 혹은 쿼리별로 인덱스 사용을 강제/회피하는 힌트가 필요한지 엔진별로 따로
+검토해야 한다는 뜻이다. 6-5장(실시간 파일 조회 유스케이스, `docs/db-engine-evaluation-report.md`
+참고)처럼 필터/조인 위주 워크로드라면 이번 인덱스 적용으로 두 엔진 다 실사용 가능한 수준에
+도달했다고 볼 수 있다.
+
+---
+
+## 7. 재현 방법
+
+전체 재현 절차는 `docs/airgap-full-test-runbook.md` 참고. 인덱스 생성은:
+
+```sql
+-- PostgreSQL (psql 직접 접속)
+CREATE INDEX idx_iot_events_device_id ON iot_events (device_id);
+ANALYZE iot_events;
+
+-- Ignite (sqlline 직접 접속)
+CREATE INDEX idx_iot_events_device_id ON PUBLIC.IOT_EVENTS (device_id);
+```
