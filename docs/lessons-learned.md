@@ -134,31 +134,47 @@ Ignite 옵티마이저가 새 인덱스를 이용한 "group sorted"(인덱스를
 그 엔진의 옵티마이저가 그 상황에서 올바른 선택을 하는지까지 확인해야 한다** — 옵티마이저의
 성숙도 차이가 여기서도 드러났다.
 
-### 2-9. PostgreSQL replica 확장은 효과가 실측됐는데, PgBouncer는 교과서적 기대와 달리 이득이 안 잡혔다
+### 2-9. PostgreSQL replica 확장 + PgBouncer — 처음엔 "효과 없음"으로 보였는데, 파고드니 두 가지 진짜 이유가 있었다
 
-CNPG `instances`를 1→2로 늘리고(primary + streaming replica) PgBouncer(`Pooler` CRD,
-transaction 모드)를 앞에 세운 뒤, 이번엔 단일 쿼리 시간이 아니라 `pgbench` 동시성(20 클라이언트)
-방식으로 측정했다 — replica도 PgBouncer도 단일 쿼리를 빠르게 하는 물건이 아니라서, 기존 측정
-방식으로는 애초에 효과가 보일 수 없기 때문이다 (replica는 단일 쿼리를 병렬화하지 않고, PgBouncer의
-효용은 수많은 짧은 연결의 생성 비용 상각이다).
+CNPG `instances`를 1→2로 늘리고(primary + streaming replica) PgBouncer(`Pooler` CRD, transaction
+모드)를 앞에 세운 뒤, 단일 쿼리 시간이 아니라 `pgbench` 동시성 방식으로 측정했다 — replica도
+PgBouncer도 단일 쿼리를 빠르게 하는 물건이 아니라서, 기존 측정 방식으로는 애초에 효과가 안 보이기
+때문이다 (replica는 단일 쿼리를 병렬화하지 않고, PgBouncer의 효용은 수많은 짧은 연결의 비용 상각
+또는 커넥션 수 자체를 제한하는 admission control이다).
 
-결과는 반반이었다:
+**인스턴스 확장은 처음부터 기대대로 동작했다.** 20 동시 클라이언트를 `-r` 서비스(round-robin)로
+분산시키니 primary 단독 대비 처리량 약 1.42~1.49배, 지연도 감소 — 각 replica가 자기 CPU/메모리를
+가진 완전한 복사본이라 커넥션 단위로 부하가 실제로 나눠지는, Ignite의 `query_parallelism`(노드 내
+병렬화)과는 전혀 다른 메커니즘의 순수 scale-out이다.
 
-- **인스턴스 확장은 기대대로 동작했다.** 20 동시 클라이언트를 `-r` 서비스(round-robin)로
-  분산시키니 primary 단독 대비 처리량 약 1.42~1.49배, 지연도 감소. 각 replica가 자기 CPU/메모리를
-  가진 완전한 복사본이라 커넥션 단위로 부하가 실제로 나눠지는, Ignite의 `query_parallelism`
-  (노드 내 병렬화)과는 전혀 다른 메커니즘의 순수 scale-out이다.
-- **PgBouncer는 이득이 측정되지 않았다 — 오히려 순위가 run마다 뒤집힐 정도로 차이가 없었다.**
-  매 트랜잭션 재연결(`-C`) 부하에서 직결 206.9/183.4 tps vs pooler 경유 199.7/201.2 tps (2회 측정).
-  "백엔드 프로세스 생성 비용을 서버 커넥션 재사용으로 없앤다"는 PgBouncer의 고전적 존재 이유가
-  이 조건에서는 전혀 안 나타났다.
+**PgBouncer는 처음(20 동시 클라이언트, 매 트랜잭션 재연결, TLS 기본값) 측정에서 이득이 전혀 안
+보였다** — 직결 206.9/183.4 tps vs pooler 경유 199.7/201.2 tps (2회 측정, 순위가 run마다 뒤집힘).
+왜 그런지 3단계로 파고들었다:
 
-원인은 확정 못 했다. 정황 증거는 하나 있다 — **연결 시간이 직결이든 pooler든 19~22ms로 사실상
-동일**했다는 것. PgBouncer도 들어오는 클라이언트 연결마다 인증(SCRAM 협상)을 그대로 다 하므로,
-연결 비용의 대부분이 백엔드 생성이 아니라 인증 왕복이라면 pooler로 아낄 게 없다. 클러스터 내부
-저지연 네트워크라 애초에 아낄 비용 자체가 작았을 가능성도 있다. 어느 쪽이든 추정일 뿐이라
-단정하지 않는다 — 외부 네트워크 지연이 있는 클라이언트, 더 큰 pool, md5 vs SCRAM 비교가 다음
-세션 후보다. 숫자는 `docs/test-results-summary.md` 9장.
+1. **연결 시간이 직결/pooler 둘 다 19~22ms로 동일**했다 — 뭔가가 두 경로의 진짜 차이를 가리고
+   있다는 신호. `pg_authid`로 확인하니 `eds` 유저 비밀번호는 SCRAM-SHA-256(4096 iteration,
+   여러 라운드트립+PBKDF2라 원래 비쌈), 그런데 pgbouncer의 `pg_hba.conf`는 클라이언트 인증에
+   **md5**를 쓰고 있었다(`auth_type=hba`) — 즉 pooler 경로가 오히려 더 싼 인증을 쓰는데도 안 빨랐다.
+2. **TLS를 의심하고 `PGSSLMODE=disable`로 재측정**했다 — 직결 227.0 tps → pooler 268.3 tps로
+   **드디어 pooler가 18% 더 빠르게 나왔다.** `client_tls_sslmode=prefer` + PostgreSQL `ssl=on`이라
+   기본 상태에서는 두 경로 다 TLS 핸드셰이크(비대칭 암호화 연산)를 거치는데, 이 비용이 md5 vs
+   SCRAM 인증 비용 차이보다 훨씬 커서 그 차이를 통째로 가리고 있었던 것. **TLS를 껐을 때만
+   PgBouncer의 진짜 이점(더 싼 인증 + 백엔드 재사용)이 드러났다.**
+3. **동시 접속을 100으로 올려서(TLS 기본값 상태로) 재측정**했다 — 여기서 진짜 결정적인 차이가
+   나왔다. 직결은 `FATAL: remaining connection slots are reserved for roles with the SUPERUSER
+   attribute`로 **일부 클라이언트가 아예 접속 실패**했다(`max_connections=100`인데 100개 클라이언트가
+   동시에 재연결을 시도하니 슬롯이 바닥남). PgBouncer 경유는 같은 100 동시 클라이언트를 에러 하나
+   없이 처리했다 — `default_pool_size=25`로 실제 백엔드 연결은 25개로 눌러놓고 나머지는 대기시키는
+   식이라, Postgres 입장에서는 항상 25개 이하로만 보인다. **tps 자체(142 vs 147)는 큰 차이가
+   없었지만, "죽지 않고 처리한다"는 이게 PgBouncer의 진짜 존재 이유였다.**
+
+**정리**: PgBouncer의 효과가 처음에 안 보였던 건 두 가지가 겹쳐서였다 — (1) TLS 핸드셰이크
+비용이 인증 방식 차이(md5 vs SCRAM)를 가릴 만큼 컸고, (2) 애초에 처음 테스트한 동시성(20)이
+Postgres의 `max_connections`(100)에 전혀 위협이 안 되는 수준이라 admission control이라는
+PgBouncer의 핵심 가치가 발동할 상황 자체가 아니었다. **"쿼리가 빨라지는가"로 PgBouncer를 평가하면
+안 되고, "동시 접속이 max_connections를 넘어설 수 있는 상황에서 서비스가 죽지 않는가"로 평가해야
+한다** — 오늘 100 동시 접속 테스트가 그 상황을 정확히 재현했다. 숫자는
+`docs/test-results-summary.md` 9장.
 
 ### 2-10. Kafka를 Trino로 조회하는 건 Redis보다 구조적으로 더 나쁘다 — 다만 애초에 그럴 용도가 아니었다
 
@@ -259,7 +275,7 @@ SPOF.
 | ★ 보조 인덱스 (`device_id`) | 추가함, 단순 필터 2배(0.50s→0.23s)·GROUP BY 2배(1.07s→0.52s) 개선 | 옵티마이저가 "Parallel Index Only Scan"으로 똑똑하게 활용 — Ignite와 달리 인덱스 추가로 손해 보는 쿼리가 하나도 없었음 |
 | JOIN 성능 | 인덱스 추가해도 1.46s로 변화 없음 | 이미 충분히 빨라서(원래도 Ignite 대비 12배) 인덱스 유무가 체감되지 않는 수준 |
 | ★ 인스턴스 수 (CNPG) | 1→2 (primary + streaming replica) + `Pooler`(rw/ro) 배포 | 20 동시 클라이언트 읽기 처리량 1.42~1.49배 개선 확인. 단일 쿼리 지연에는 효과 없음(설계상 당연 — replica는 단일 쿼리를 병렬화하지 않음). HA가 본 목적, 처리량은 덤 |
-| PgBouncer 효과 | transaction 모드 Pooler 경유 `-C` 테스트에서 직결 대비 이득 없음 (2-9 참고) | 원인 미확정 — 인증(SCRAM) 왕복이 연결 비용을 지배한다는 추정만 있음. 다음 세션 후보 참고 |
+| ★ PgBouncer 효과 | 원인 규명 완료(2-9) — TLS 핸드셰이크가 인증 방식 차이(md5 vs SCRAM)를 가리고 있었고, 저동시성(20)에선 `max_connections` 위협이 없어 admission control 가치가 안 드러났음 | `PGSSLMODE=disable`로 재측정하니 18% 개선(227→268 tps), 100 동시접속으로 올리니 직결은 커넥션 슬롯 부족으로 일부 접속 실패·pooler는 무손실 처리 — 이게 PgBouncer의 진짜 가치 |
 
 ### Trino
 
@@ -279,5 +295,9 @@ SPOF.
 - `backups=0` vs `backups=1`로 순수 노드 확장 효과와 복제 오버헤드를 분리해서 측정 (지금은 둘을
   같이 바꿔서 어느 쪽 기여가 큰지 분리 안 됨)
 - 상시 연결 클라이언트로 고정 오버헤드 없이 재측정
-- PgBouncer 무이득(2-9) 원인 규명: 외부 네트워크 지연이 있는 클라이언트에서 재측정, pool 크기
-  상향, md5 vs SCRAM 인증 비교로 연결 비용에서 인증 왕복이 차지하는 비중 분리
+- PgBouncer `SHOW POOLS`/`SHOW STATS`로 백엔드 연결 재사용 수치를 직접 확인 (admin_users가
+  `eds`가 아니라 `pgbouncer` 계정이라 이번엔 자격증명을 못 구해서 못 함 — 정황 증거(TLS 끈
+  상태의 18% 개선, 100동접에서의 무손실 처리)로 결론은 충분히 뒷받침되지만 이 수치까지 있으면
+  더 확실함)
+- 외부(클러스터 밖) 네트워크 지연이 있는 실제 클라이언트 환경에서 TLS on/off 차이가 이번 결과보다
+  더 크게 벌어지는지 확인 (이번 측정은 전부 클러스터 내부 저지연 환경이었음)
