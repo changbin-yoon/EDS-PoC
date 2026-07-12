@@ -19,6 +19,7 @@
 | Trino coordinator `OOMKilled` (대량 INSERT 중) | 46,216행짜리 테이블을 500행 단위 배치로 INSERT하다 컨테이너 메모리 limit(2Gi) 초과 | limit을 4Gi로 상향, 큰 테이블은 배치 크기를 150행으로 축소 |
 | `kubectl cp`/`psql \copy` 실행 시 `Cannot open: Read-only file system` | CNPG postgres 컨테이너는 `/tmp`가 읽기전용(보안 하드닝) | `/controller` 또는 `/var/lib/postgresql/data` 하위처럼 쓰기 가능한 경로 사용 |
 | `sqlline.sh`가 `Enter username for jdbc:ignite:thin://...`에서 멈춤(EOF 에러) | 비대화형(exec) 환경에서 자격증명 프롬프트가 뜨는데 입력을 못 받음 | `--connectInteractionMode=notAskCredentials` + `-n`/`-p`(auth 비활성화 상태면 아무 값) 옵션 추가 |
+| StatefulSet을 1→3 replica로 늘렸는데 새 노드에 데이터가 안 감 | `kubectl scale`/replica 수 변경만으로는 새로 조인한 노드가 클러스터 **topology**엔 들어가지만 persistence의 **baseline**엔 자동으로 안 들어감(auto-adjust가 기본 비활성화) — 파티션 재분배가 아예 안 일어남 | `control.sh --baseline add <consistentId1>,<consistentId2> --yes`로 수동 추가해야 실제로 리밸런싱이 시작됨. `--yes` 없으면 비대화형 환경에서 확인 프롬프트 때문에 멈춤(위 sqlline과 같은 패턴) |
 
 ---
 
@@ -191,11 +192,11 @@ SPOF.
 |---|---|---|
 | ★ `query_parallelism` | 4로 상향, 2.1배 개선 확인 | CPU limit을 늘리면 그만큼 더 올릴 여지 있음 — 반드시 cgroup 기준 실제 할당량으로 맞출 것(`nproc`는 host 값이라 오해 소지). JOIN할 테이블들은 반드시 같은 값으로 통일할 것(2-7 참고) |
 | ★ 메모리 축소 영향 확인 | limit 30Gi→16Gi(힙 6g→4g, off-heap 23GB→10GB)로 줄이니 단순 필터 등 일부 쿼리가 오히려 느려짐 | 16Gi가 이 데이터량(9M행)엔 빠듯한 것으로 보임 — off-heap을 다시 늘리거나(가능하면), 데이터량 대비 적정선을 다시 찾아볼 것 |
-| 노드 수 | 1개 (single replica) | 여러 노드로 늘리면 파티션이 노드 간에도 분산돼 `query_parallelism`과 별개로 추가 병렬화 가능 — 아직 안 써본 레버 |
+| ★ 노드 수 | 1→3으로 확장, `AFFINITY_KEY=device_id`로 collocated join 구성 | GROUP BY가 지금까지 시도한 방법 중 가장 크게 개선(5.91s→2.58s, 인덱스보다 나음). 단순 필터도 인덱스 없이 affinity 라우팅만으로 인덱스 적용 수준(0.97s) 도달. JOIN도 개선(17.27s→3.57s)됐지만 PostgreSQL(1.46s)에는 여전히 못 미침 — 8장 참고 |
 | WAL 모드 | `LOG_ONLY` | `FSYNC`(더 안전, 더 느림)와의 트레이드오프 재검토, 체크포인트 주기(`checkpointFreq`, 현재 180000ms)도 튜닝 대상 |
-| ★ 보조 인덱스 (`device_id`) | 추가함, 단순 필터 5배·JOIN 6배 개선(직접 질의 기준) | 반대로 GROUP BY는 2배 악화(5.91s→12.05s) — 옵티마이저가 인덱스를 쓰는 "group sorted" 전략을 골랐는데 이게 더 느렸음(2-8 참고). 워크로드가 집계 위주면 인덱스를 안 걸거나, 힌트로 강제 풀스캔을 검토할 것 |
-| JOIN 성능 | 인덱스 추가로 17.27s→2.93s로 대폭 개선 | 여전히 PostgreSQL(1.46s)보단 느림 — 조인 키를 affinity key로 맞춘 collocated join까지 적용하면 추가 개선 여지 있음(2-6, 2-7 참고) |
+| 보조 인덱스 (`device_id`) | 1노드 기준 추가해봄 — 단순 필터 5배·JOIN 6배 개선, GROUP BY는 2배 악화(2-8 참고) | 3노드+affinity 조합에서는 인덱스 없이도 이 정도 성능이 나와서, 인덱스보다 노드 확장+affinity 설계가 이 워크로드엔 더 나은 선택으로 보임 |
 | 인덱스 생성 자체 속도 | 900만 행 기준 60.6초 (PostgreSQL은 4.1초) | 온라인으로 인덱스를 거는 운영 시나리오라면 이 소요 시간도 고려 대상 |
+| baseline auto-adjust | 비활성화 상태(기본값) | 노드를 자주 늘렸다 줄였다 하는 운영이면 `control.sh --baseline auto_adjust enable`로 자동화 검토 — 지금은 수동으로 `--baseline add` 안 하면 새 노드가 데이터를 안 받음(1장 표 참고) |
 
 ### PostgreSQL
 
@@ -218,8 +219,11 @@ SPOF.
 ### 다음 세션 후보 (아직 검증 안 된 것)
 
 - Ignite off-heap을 16Gi 한도 내에서 다시 조정(예: heap 3g/off-heap 11GB)해서 단순 필터 성능 회복되는지 확인
-- Trino worker를 실제로 늘려서 JOIN 쿼리가 얼마나 개선되는지 실측 (지금까지 worker 0대로만 테스트함)
-- Ignite GROUP BY가 인덱스 때문에 느려진 문제 — 힌트로 풀스캔을 강제했을 때 원래 속도(5.91s)로
-  돌아오는지 확인, 혹은 조인 키를 affinity key로 맞춘 collocated join 적용
-- Ignite 멀티 노드(2~3 replica)로 늘려서 노드 간 파티션 분산 효과 실측 (JOIN 성능 포함)
+- Trino worker를 실제로 늘려서 JOIN 쿼리가 얼마나 개선되는지 실측 (지금까지 worker 0대로만 테스트함) —
+  단, Trino가 JOIN을 애초에 pushdown 안 하는 걸 확인했으니(2-6, 8-3) collocation 이득과는
+  별개 효과로 접근할 것
+- 3노드+affinity key 상태에서 `device_id` 인덱스까지 같이 걸면 JOIN이 PostgreSQL(1.46s) 수준까지
+  따라잡는지 확인 (지금은 3.57s로 아직 격차 있음)
+- `backups=0` vs `backups=1`로 순수 노드 확장 효과와 복제 오버헤드를 분리해서 측정 (지금은 둘을
+  같이 바꿔서 어느 쪽 기여가 큰지 분리 안 됨)
 - 상시 연결 클라이언트로 고정 오버헤드 없이 재측정
